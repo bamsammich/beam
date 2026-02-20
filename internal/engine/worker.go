@@ -118,7 +118,9 @@ func (wp *WorkerPool) createDirectory(task FileTask) error {
 }
 
 func (wp *WorkerPool) createSymlink(task FileTask) error {
-	// Remove existing symlink if present.
+	if err := os.MkdirAll(filepath.Dir(task.DstPath), 0755); err != nil {
+		return fmt.Errorf("create parent dir for symlink %s: %w", task.DstPath, err)
+	}
 	_ = os.Remove(task.DstPath)
 
 	if err := os.Symlink(task.LinkTarget, task.DstPath); err != nil {
@@ -139,6 +141,9 @@ func (wp *WorkerPool) createHardlink(task FileTask) error {
 	}
 	dstTarget := filepath.Join(filepath.Dir(task.DstPath), relTarget)
 
+	if err := os.MkdirAll(filepath.Dir(task.DstPath), 0755); err != nil {
+		return fmt.Errorf("create parent dir for hardlink %s: %w", task.DstPath, err)
+	}
 	_ = os.Remove(task.DstPath)
 
 	if err := os.Link(dstTarget, task.DstPath); err != nil {
@@ -156,6 +161,12 @@ func (wp *WorkerPool) copyRegularFile(ctx context.Context, task FileTask) error 
 	base := filepath.Base(task.DstPath)
 	tmpName := fmt.Sprintf(".%s.%s.beam-tmp", base, uuid.New().String()[:8])
 	tmpPath := filepath.Join(dir, tmpName)
+
+	// Ensure parent directory exists (may race with dir task workers).
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		wp.cfg.Stats.AddFilesFailed(1)
+		return fmt.Errorf("create parent dir %s: %w", dir, err)
+	}
 
 	RegisterTmp(tmpPath)
 	defer func() {
