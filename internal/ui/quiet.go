@@ -4,7 +4,7 @@ import "github.com/bamsammich/beam/internal/stats"
 
 // quietPresenter consumes events but produces no output.
 type quietPresenter struct {
-	stats *stats.Collector
+	stats stats.Reader
 }
 
 func (p *quietPresenter) Run(events <-chan Event) error {
@@ -14,12 +14,9 @@ func (p *quietPresenter) Run(events <-chan Event) error {
 	return nil
 }
 
-func (p *quietPresenter) handleEvent(ev Event) {
-	// Quiet mode still needs to track scan totals for the collector.
-	switch ev.Type {
-	case ScanComplete:
-		p.stats.SetTotals(ev.Total, ev.TotalSize)
-	}
+func (p *quietPresenter) handleEvent(_ Event) {
+	// Totals are set on the collector directly by the engine;
+	// presenters only read from the collector, never write.
 }
 
 func (p *quietPresenter) Summary() string {

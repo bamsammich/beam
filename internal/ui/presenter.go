@@ -24,7 +24,7 @@ type Config struct {
 	ForceFeed  bool
 	ForceRate  bool
 	NoProgress bool
-	Stats      *stats.Collector
+	Stats      stats.ReadTicker
 	Workers    int
 	DstRoot    string // destination root path, stripped from displayed paths
 }

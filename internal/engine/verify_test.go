@@ -167,7 +167,7 @@ func TestEngine_CopyWithVerify(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(src, "file.txt"), []byte("data"), 0644))
 
 	result := Run(context.Background(), Config{
-		Src:       src,
+		Sources:   []string{src},
 		Dst:       dst,
 		Recursive: true,
 		Workers:   2,
@@ -188,7 +188,7 @@ func TestEngine_VerifySkippedOnDryRun(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(src, "file.txt"), []byte("data"), 0644))
 
 	result := Run(context.Background(), Config{
-		Src:       src,
+		Sources:   []string{src},
 		Dst:       dst,
 		Recursive: true,
 		Workers:   1,

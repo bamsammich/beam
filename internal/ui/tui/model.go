@@ -92,7 +92,7 @@ func (s *saveModal) render() string {
 // Model is the root Bubble Tea model.
 type Model struct {
 	events  <-chan event.Event
-	stats   *stats.Collector
+	stats   stats.ReadTicker
 	workers int
 	dstRoot string
 	srcRoot string
@@ -119,7 +119,7 @@ type Model struct {
 }
 
 // NewModel creates a new TUI model.
-func NewModel(events <-chan event.Event, collector *stats.Collector, workers int, dstRoot, srcRoot string, workerLimit *atomic.Int32) Model {
+func NewModel(events <-chan event.Event, collector stats.ReadTicker, workers int, dstRoot, srcRoot string, workerLimit *atomic.Int32) Model {
 	return Model{
 		events:      events,
 		stats:       collector,
@@ -368,10 +368,8 @@ func (m Model) writeReport(path string) tea.Cmd {
 }
 
 func (m Model) handleEngineEvent(ev event.Event) (tea.Model, tea.Cmd) {
-	switch ev.Type {
-	case event.ScanComplete:
-		m.stats.SetTotals(ev.Total, ev.TotalSize)
-	}
+	// Totals are set on the collector directly by the engine;
+	// presenters only read from the collector, never write.
 
 	// Forward to both views so they stay in sync.
 	m.feed.handleEvent(ev)

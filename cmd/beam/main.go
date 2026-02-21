@@ -71,13 +71,13 @@ func run() int {
 	chain := filter.NewChain()
 
 	rootCmd := &cobra.Command{
-		Use:   "beam <source> <destination>",
+		Use:   "beam [flags] <source>... <destination>",
 		Short: "Insanely fast file transfer tool",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if showVersion {
 				return nil
 			}
-			return cobra.ExactArgs(2)(cmd, args)
+			return cobra.MinimumNArgs(2)(cmd, args)
 		},
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -87,8 +87,8 @@ func run() int {
 				return nil
 			}
 
-			src := args[0]
-			dst := args[1]
+			sources := args[:len(args)-1]
+			dst := args[len(args)-1]
 
 			// Load optional config file.
 			cfg, err := config.Load()
@@ -157,6 +157,12 @@ func run() int {
 			workerLimit := &atomic.Int32{}
 			workerLimit.Store(int32(workers))
 
+			// Format source display string for presenters.
+			srcDisplay := sources[0]
+			if len(sources) > 1 {
+				srcDisplay = fmt.Sprintf("%s (+%d more)", sources[0], len(sources)-1)
+			}
+
 			// Create presenter.
 			isTTY := ui.IsTTY(os.Stderr.Fd())
 			var presenter ui.Presenter
@@ -165,7 +171,7 @@ func run() int {
 					Stats:       collector,
 					Workers:     workers,
 					DstRoot:     dst,
-					SrcRoot:     src,
+					SrcRoot:     srcDisplay,
 					Theme:       cfg.Theme,
 					WorkerLimit: workerLimit,
 				})
@@ -189,7 +195,7 @@ func run() int {
 			}
 
 			engineCfg := engine.Config{
-				Src:            src,
+				Sources:        sources,
 				Dst:            dst,
 				Recursive:      recursive,
 				Archive:        archive,
@@ -213,7 +219,7 @@ func run() int {
 			}
 
 			slog.Debug("starting copy",
-				"src", src,
+				"sources", sources,
 				"dst", dst,
 				"workers", workers,
 				"archive", archive,

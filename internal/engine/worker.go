@@ -27,7 +27,7 @@ type WorkerConfig struct {
 	NoTimes       bool // disable all time preservation including default mtime
 	DryRun        bool
 	UseIOURing    bool
-	Stats         *stats.Collector
+	Stats         stats.Writer
 	Events        chan<- event.Event
 	DstRoot       string        // destination root for computing relative paths
 	WorkerLimit   *atomic.Int32 // runtime throttle; nil = all workers active

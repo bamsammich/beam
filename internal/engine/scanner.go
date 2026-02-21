@@ -27,7 +27,7 @@ type ScannerConfig struct {
 	SparseDetect   bool
 	Events         chan<- event.Event
 	Filter         *filter.Chain
-	Stats          *stats.Collector // if set, totals are written directly (avoids event-drop)
+	Stats          stats.Writer // if set, skipped-file stats are recorded directly
 }
 
 // Scanner traverses a directory tree in parallel and emits FileTask items.
@@ -93,11 +93,6 @@ func (s *Scanner) scanTree(ctx context.Context) {
 	close(workQueue)
 	workerWg.Wait()
 
-	s.emit(event.Event{
-		Type:      event.ScanComplete,
-		Total:     s.totalFiles.Load(),
-		TotalSize: s.totalBytes.Load(),
-	})
 }
 
 func (s *Scanner) scanDir(ctx context.Context, srcPath string, workQueue chan<- string, outstanding *sync.WaitGroup) {

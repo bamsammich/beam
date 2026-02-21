@@ -9,6 +9,54 @@ import (
 
 const ringSize = 60
 
+// Reader provides read-only access to copy operation statistics.
+// Presenters and UI components accept this interface.
+type Reader interface {
+	Snapshot() Snapshot
+	RollingSpeed(seconds int) float64
+	RollingFilesPerSec(seconds int) float64
+	SparklineData(n int) []float64
+	ETA() time.Duration
+	Elapsed() time.Duration
+}
+
+// Writer provides write access to copy operation statistics.
+// Engine internals (scanner, workers, verify) accept this interface.
+type Writer interface {
+	SetTotals(files, bytes int64)
+	AddFilesScanned(n int64)
+	AddFilesCopied(n int64)
+	AddFilesFailed(n int64)
+	AddFilesSkipped(n int64)
+	AddBytesCopied(n int64)
+	AddDirsCreated(n int64)
+	AddHardlinksCreated(n int64)
+	AddFilesVerified(n int64)
+	AddFilesVerifyFailed(n int64)
+}
+
+// Ticker provides access to the ring-buffer sampling method.
+// Only presenters that drive the tick cadence (HUD, TUI) need this.
+type Ticker interface {
+	Tick()
+}
+
+// ReadTicker composes Reader and Ticker for presenters that both
+// read stats and drive the sampling tick (like io.ReadCloser composes
+// io.Reader and io.Closer).
+type ReadTicker interface {
+	Reader
+	Ticker
+}
+
+// ReadWriter provides full read-write access to copy operation statistics.
+// The engine's top-level Run function accepts this interface: it writes
+// totals during the operation and reads a final Snapshot for the result.
+type ReadWriter interface {
+	Reader
+	Writer
+}
+
 // Collector tracks copy operation statistics using lock-free atomic counters.
 type Collector struct {
 	filesScanned     atomic.Int64
