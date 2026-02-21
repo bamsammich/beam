@@ -28,6 +28,7 @@ type ScannerConfig struct {
 	Events         chan<- event.Event
 	Filter         *filter.Chain
 	Stats          *stats.Collector // if set, totals are written directly (avoids event-drop)
+	Checkpoint     *CheckpointDB    // if set, skip already-completed files
 }
 
 // Scanner traverses a directory tree in parallel and emits FileTask items.
@@ -201,6 +202,19 @@ func (s *Scanner) processEntry(ctx context.Context, srcPath, dstPath string, wor
 		return nil
 
 	case mode.IsRegular():
+		// Skip files already completed in a previous run.
+		if s.cfg.Checkpoint != nil {
+			relPath, _ := filepath.Rel(s.cfg.SrcRoot, srcPath)
+			if s.cfg.Checkpoint.IsCompleted(relPath, info.Size(), info.ModTime().UnixNano()) {
+				s.emit(event.Event{Type: event.FileSkipped, Path: relPath, Size: info.Size()})
+				if s.cfg.Stats != nil {
+					s.cfg.Stats.AddFilesSkipped(1)
+					s.cfg.Stats.AddBytesCopied(info.Size())
+				}
+				return nil
+			}
+		}
+
 		devino := DevIno{Dev: stat.Dev, Ino: stat.Ino}
 		if stat.Nlink > 1 {
 			if firstPath, seen := s.inodeSeen.LoadOrStore(devino, srcPath); seen {

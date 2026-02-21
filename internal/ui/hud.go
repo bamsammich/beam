@@ -124,6 +124,18 @@ func (p *hudPresenter) handleEvent(ev Event) {
 			p.drawHUD()
 		}
 
+	case VerifyStarted:
+		p.clearHUD()
+		fmt.Fprintf(p.w, "%sverifying checksums...%s\n", ansiDim, ansiReset)
+
+	case VerifyOK:
+		// Only show in verbose / feed mode — dim output.
+
+	case VerifyFailed:
+		p.clearHUD()
+		fmt.Fprintf(p.w, "\u2717  %s  CHECKSUM MISMATCH\n", p.styledPath(ev.Path))
+		p.drawHUD()
+
 	case DirCreated, HardlinkCreated:
 		delete(p.busyWorkers, ev.WorkerID)
 	}

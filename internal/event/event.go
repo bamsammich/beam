@@ -16,6 +16,9 @@ const (
 	DirCreated
 	HardlinkCreated
 	DeleteFile
+	VerifyStarted
+	VerifyOK
+	VerifyFailed
 )
 
 var typeNames = [...]string{
@@ -29,6 +32,9 @@ var typeNames = [...]string{
 	DirCreated:      "DirCreated",
 	HardlinkCreated: "HardlinkCreated",
 	DeleteFile:      "DeleteFile",
+	VerifyStarted:   "VerifyStarted",
+	VerifyOK:        "VerifyOK",
+	VerifyFailed:    "VerifyFailed",
 }
 
 func (t Type) String() string {

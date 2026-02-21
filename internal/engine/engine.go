@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -30,6 +31,8 @@ type Config struct {
 	Stats          *stats.Collector   // nil = engine creates its own
 	Filter         *filter.Chain      // nil = no filtering
 	Delete         bool               // delete extraneous files from destination
+	Verify         bool               // post-copy BLAKE3 checksum verification
+	NoResume       bool               // disable resume/checkpoint
 }
 
 func (c Config) emit(e event.Event) {
@@ -81,6 +84,25 @@ func runDirCopy(ctx context.Context, cfg Config, collector *stats.Collector, rec
 		return Result{Err: fmt.Errorf("create destination: %w", err)}
 	}
 
+	var copyErr error
+
+	// Open checkpoint DB for resume support.
+	var checkpoint *CheckpointDB
+	if !cfg.NoResume && !cfg.DryRun {
+		var err error
+		checkpoint, err = OpenCheckpoint(cfg.Src, cfg.Dst)
+		if err != nil {
+			slog.Warn("checkpoint unavailable, proceeding without resume", "error", err)
+		} else {
+			defer func() {
+				if copyErr == nil && !cfg.Verify {
+					checkpoint.Remove()
+				}
+				checkpoint.Close()
+			}()
+		}
+	}
+
 	// Prescan: quickly count files and bytes for accurate progress display.
 	// This only does readdir+lstat (no file opens), so it's very fast.
 	totalFiles, totalBytes := Prescan(ctx, cfg.Src, cfg.Filter)
@@ -100,6 +122,8 @@ func runDirCopy(ctx context.Context, cfg Config, collector *stats.Collector, rec
 		IncludeXattrs:  cfg.Archive,
 		Events:         cfg.Events,
 		Filter:         cfg.Filter,
+		Checkpoint:     checkpoint,
+		Stats:          collector,
 	}
 
 	workerCfg := WorkerConfig{
@@ -112,6 +136,8 @@ func runDirCopy(ctx context.Context, cfg Config, collector *stats.Collector, rec
 		UseIOURing:    cfg.UseIOURing,
 		Stats:         collector,
 		Events:        cfg.Events,
+		Checkpoint:    checkpoint,
+		DstRoot:       cfg.Dst,
 	}
 
 	scanner := NewScanner(scanCfg)
@@ -125,7 +151,6 @@ func runDirCopy(ctx context.Context, cfg Config, collector *stats.Collector, rec
 
 	// Collect errors from both scanner and workers.
 	allErrs := make(chan error, 64)
-	var copyErr error
 
 	// Drain scanner errors in a goroutine.
 	go func() {
@@ -165,6 +190,21 @@ func runDirCopy(ctx context.Context, cfg Config, collector *stats.Collector, rec
 		}
 		if _, err := DeleteExtraneous(ctx, delCfg); err != nil && copyErr == nil {
 			copyErr = err
+		}
+	}
+
+	// Post-copy verification.
+	if cfg.Verify && !cfg.DryRun {
+		vr := Verify(ctx, VerifyConfig{
+			SrcRoot: cfg.Src,
+			DstRoot: cfg.Dst,
+			Workers: cfg.Workers,
+			Filter:  cfg.Filter,
+			Events:  cfg.Events,
+			Stats:   collector,
+		})
+		if vr.Failed > 0 && copyErr == nil {
+			copyErr = fmt.Errorf("%d files failed verification", vr.Failed)
 		}
 	}
 

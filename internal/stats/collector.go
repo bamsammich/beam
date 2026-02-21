@@ -18,9 +18,11 @@ type Collector struct {
 	bytesCopied      atomic.Int64
 	dirsCreated      atomic.Int64
 	hardlinksCreated atomic.Int64
-	bytesTotal       atomic.Int64
-	filesTotal       atomic.Int64
-	startTime        time.Time
+	bytesTotal        atomic.Int64
+	filesTotal        atomic.Int64
+	filesVerified     atomic.Int64
+	filesVerifyFailed atomic.Int64
+	startTime         time.Time
 
 	// Ring buffer — written only by presenter's Tick(), not workers.
 	mu          sync.Mutex
@@ -58,9 +60,11 @@ type Snapshot struct {
 	BytesCopied      int64
 	DirsCreated      int64
 	HardlinksCreated int64
-	BytesTotal       int64
-	FilesTotal       int64
-	Elapsed          time.Duration
+	BytesTotal        int64
+	FilesTotal        int64
+	FilesVerified     int64
+	FilesVerifyFailed int64
+	Elapsed           time.Duration
 }
 
 func (c *Collector) AddFilesScanned(n int64)    { c.filesScanned.Add(n) }
@@ -70,6 +74,8 @@ func (c *Collector) AddFilesSkipped(n int64)     { c.filesSkipped.Add(n) }
 func (c *Collector) AddBytesCopied(n int64)      { c.bytesCopied.Add(n) }
 func (c *Collector) AddDirsCreated(n int64)      { c.dirsCreated.Add(n) }
 func (c *Collector) AddHardlinksCreated(n int64) { c.hardlinksCreated.Add(n) }
+func (c *Collector) AddFilesVerified(n int64)     { c.filesVerified.Add(n) }
+func (c *Collector) AddFilesVerifyFailed(n int64)  { c.filesVerifyFailed.Add(n) }
 
 // Snapshot returns a consistent point-in-time read of all counters.
 func (c *Collector) Snapshot() Snapshot {
@@ -81,9 +87,11 @@ func (c *Collector) Snapshot() Snapshot {
 		BytesCopied:      c.bytesCopied.Load(),
 		DirsCreated:      c.dirsCreated.Load(),
 		HardlinksCreated: c.hardlinksCreated.Load(),
-		BytesTotal:       c.bytesTotal.Load(),
-		FilesTotal:       c.filesTotal.Load(),
-		Elapsed:          c.Elapsed(),
+		BytesTotal:        c.bytesTotal.Load(),
+		FilesTotal:        c.filesTotal.Load(),
+		FilesVerified:     c.filesVerified.Load(),
+		FilesVerifyFailed: c.filesVerifyFailed.Load(),
+		Elapsed:           c.Elapsed(),
 	}
 }
 

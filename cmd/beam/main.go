@@ -57,6 +57,8 @@ func run() int {
 		forceRate      bool
 		noProgress     bool
 		deleteFlag     bool
+		verifyFlag     bool
+		noResume       bool
 		filterFile     string
 		minSizeStr     string
 		maxSizeStr     string
@@ -176,6 +178,8 @@ func run() int {
 				Events:         events,
 				Stats:          collector,
 				Delete:         deleteFlag,
+				Verify:         verifyFlag,
+				NoResume:       noResume,
 			}
 
 			// Only set filter if it has rules/size constraints.
@@ -237,6 +241,8 @@ func run() int {
 	rootCmd.Flags().VarP(&filterFlag{chain: chain, include: true}, "include", "", "include files matching PATTERN (repeatable)")
 	rootCmd.Flags().StringVar(&filterFile, "filter", "", "read filter rules from FILE")
 	rootCmd.Flags().BoolVar(&deleteFlag, "delete", false, "delete extraneous files from destination")
+	rootCmd.Flags().BoolVar(&verifyFlag, "verify", false, "verify checksums after copy (BLAKE3)")
+	rootCmd.Flags().BoolVar(&noResume, "no-resume", false, "disable resume/checkpoint")
 	rootCmd.Flags().StringVar(&minSizeStr, "min-size", "", "skip files smaller than SIZE (e.g. 1M, 100K)")
 	rootCmd.Flags().StringVar(&maxSizeStr, "max-size", "", "skip files larger than SIZE (e.g. 1G, 500M)")
 
