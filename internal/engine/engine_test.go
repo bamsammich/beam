@@ -39,7 +39,7 @@ func TestEngine_CopyTree(t *testing.T) {
 	require.NoError(t, os.Symlink("nested.txt", filepath.Join(src, "sub", "deep", "link")))
 
 	result := Run(context.Background(), Config{
-		Src:       src,
+		Sources:   []string{src + "/"},
 		Dst:       dst,
 		Archive:   true,
 		Workers:   4,
@@ -70,7 +70,7 @@ func TestEngine_SingleFile(t *testing.T) {
 	require.NoError(t, os.WriteFile(src, data, 0644))
 
 	result := Run(context.Background(), Config{
-		Src:     src,
+		Sources: []string{src},
 		Dst:     dst,
 		Workers: 1,
 	})
@@ -90,7 +90,7 @@ func TestEngine_SingleFileIntoDirDst(t *testing.T) {
 	require.NoError(t, os.WriteFile(src, data, 0644))
 
 	result := Run(context.Background(), Config{
-		Src:     src,
+		Sources: []string{src},
 		Dst:     dstDir,
 		Workers: 1,
 	})
@@ -110,7 +110,7 @@ func TestEngine_DirWithoutRecursive(t *testing.T) {
 	require.NoError(t, os.MkdirAll(src, 0755))
 
 	result := Run(context.Background(), Config{
-		Src:     src,
+		Sources: []string{src},
 		Dst:     dst,
 		Workers: 1,
 	})
@@ -134,7 +134,7 @@ func TestEngine_ContextCancel(t *testing.T) {
 	cancel() // Cancel immediately.
 
 	result := Run(ctx, Config{
-		Src:       src,
+		Sources:   []string{src + "/"},
 		Dst:       dst,
 		Recursive: true,
 		Workers:   4,
@@ -154,7 +154,7 @@ func TestEngine_DryRun(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(src, "sub", "nested.txt"), []byte("nested"), 0644))
 
 	result := Run(context.Background(), Config{
-		Src:       src,
+		Sources:   []string{src + "/"},
 		Dst:       dst,
 		Recursive: true,
 		DryRun:    true,
@@ -174,7 +174,7 @@ func TestEngine_DryRun(t *testing.T) {
 
 func TestEngine_SourceNotExist(t *testing.T) {
 	result := Run(context.Background(), Config{
-		Src:     "/nonexistent/path",
+		Sources: []string{"/nonexistent/path"},
 		Dst:     "/tmp/dst",
 		Workers: 1,
 	})
@@ -202,7 +202,7 @@ func TestEngine_EventSequence(t *testing.T) {
 	}()
 
 	result := Run(context.Background(), Config{
-		Src:       src,
+		Sources:   []string{src + "/"},
 		Dst:       dst,
 		Recursive: true,
 		Workers:   2,
@@ -243,7 +243,7 @@ func TestEngine_WithFilter(t *testing.T) {
 	require.NoError(t, chain.AddExclude("*.log"))
 
 	result := Run(context.Background(), Config{
-		Src:       src,
+		Sources:   []string{src + "/"},
 		Dst:       dst,
 		Recursive: true,
 		Workers:   2,
@@ -275,7 +275,7 @@ func TestEngine_DeleteExtraneous(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dst, "extra.txt"), []byte("extra"), 0644))
 
 	result := Run(context.Background(), Config{
-		Src:       src,
+		Sources:   []string{src + "/"},
 		Dst:       dst,
 		Recursive: true,
 		Workers:   2,
@@ -306,7 +306,7 @@ func TestEngine_SkipUnchanged(t *testing.T) {
 
 	// First run: copy all files.
 	result1 := Run(context.Background(), Config{
-		Src:       src,
+		Sources:   []string{src + "/"},
 		Dst:       dst,
 		Recursive: true,
 		Archive:   true,
@@ -317,7 +317,7 @@ func TestEngine_SkipUnchanged(t *testing.T) {
 
 	// Second run: destination matches source (size + mtime), all skipped.
 	result2 := Run(context.Background(), Config{
-		Src:       src,
+		Sources:   []string{src + "/"},
 		Dst:       dst,
 		Recursive: true,
 		Archive:   true,
@@ -338,7 +338,7 @@ func TestEngine_SkipUnchanged_NoArchive(t *testing.T) {
 
 	// First run without archive mode.
 	result1 := Run(context.Background(), Config{
-		Src:       src,
+		Sources:   []string{src + "/"},
 		Dst:       dst,
 		Recursive: true,
 		Workers:   2,
@@ -349,7 +349,7 @@ func TestEngine_SkipUnchanged_NoArchive(t *testing.T) {
 	// Second run: mtime is always preserved, so skip detection works
 	// even without archive mode.
 	result2 := Run(context.Background(), Config{
-		Src:       src,
+		Sources:   []string{src + "/"},
 		Dst:       dst,
 		Recursive: true,
 		Workers:   2,
@@ -369,7 +369,7 @@ func TestEngine_RecopiesDeletedFiles(t *testing.T) {
 
 	// First run.
 	result1 := Run(context.Background(), Config{
-		Src:       src,
+		Sources:   []string{src + "/"},
 		Dst:       dst,
 		Recursive: true,
 		Archive:   true,
@@ -383,7 +383,7 @@ func TestEngine_RecopiesDeletedFiles(t *testing.T) {
 
 	// Second run: should re-copy the deleted file.
 	result2 := Run(context.Background(), Config{
-		Src:       src,
+		Sources:   []string{src + "/"},
 		Dst:       dst,
 		Recursive: true,
 		Archive:   true,
@@ -396,4 +396,181 @@ func TestEngine_RecopiesDeletedFiles(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(dst, "a.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, []byte("aaa"), data)
+}
+
+func TestEngine_MultiSourceFiles(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "dst")
+	require.NoError(t, os.MkdirAll(dst, 0755))
+
+	// Create multiple source files in different locations.
+	file1 := filepath.Join(dir, "file1.txt")
+	file2 := filepath.Join(dir, "file2.txt")
+	require.NoError(t, os.WriteFile(file1, []byte("content1"), 0644))
+	require.NoError(t, os.WriteFile(file2, []byte("content2"), 0644))
+
+	result := Run(context.Background(), Config{
+		Sources: []string{file1, file2},
+		Dst:     dst,
+		Workers: 2,
+	})
+
+	require.NoError(t, result.Err)
+
+	// Both files should exist in dst.
+	got1, err := os.ReadFile(filepath.Join(dst, "file1.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte("content1"), got1)
+
+	got2, err := os.ReadFile(filepath.Join(dst, "file2.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte("content2"), got2)
+}
+
+func TestEngine_MultiSourceDirs(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "dst")
+
+	// Create two source directories (no trailing slash = copy dir itself).
+	srcA := filepath.Join(dir, "srcA")
+	srcB := filepath.Join(dir, "srcB")
+	require.NoError(t, os.MkdirAll(srcA, 0755))
+	require.NoError(t, os.MkdirAll(srcB, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(srcA, "a.txt"), []byte("aaa"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(srcB, "b.txt"), []byte("bbb"), 0644))
+
+	result := Run(context.Background(), Config{
+		Sources:   []string{srcA, srcB},
+		Dst:       dst,
+		Recursive: true,
+		Workers:   2,
+	})
+
+	require.NoError(t, result.Err)
+
+	// Each dir should be created as a subdirectory of dst.
+	gotA, err := os.ReadFile(filepath.Join(dst, "srcA", "a.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte("aaa"), gotA)
+
+	gotB, err := os.ReadFile(filepath.Join(dst, "srcB", "b.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte("bbb"), gotB)
+}
+
+func TestEngine_MultiSourceMixed(t *testing.T) {
+	dir := t.TempDir()
+	dst := filepath.Join(dir, "dst")
+	require.NoError(t, os.MkdirAll(dst, 0755))
+
+	// Create a source directory and a source file.
+	srcDir := filepath.Join(dir, "srcdir")
+	require.NoError(t, os.MkdirAll(srcDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "nested.txt"), []byte("nested"), 0644))
+
+	srcFile := filepath.Join(dir, "loose.txt")
+	require.NoError(t, os.WriteFile(srcFile, []byte("loose"), 0644))
+
+	result := Run(context.Background(), Config{
+		Sources:   []string{srcDir, srcFile},
+		Dst:       dst,
+		Recursive: true,
+		Workers:   2,
+	})
+
+	require.NoError(t, result.Err)
+
+	// Directory source (no trailing slash) → dst/srcdir/nested.txt
+	gotNested, err := os.ReadFile(filepath.Join(dst, "srcdir", "nested.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte("nested"), gotNested)
+
+	// File source → dst/loose.txt
+	gotLoose, err := os.ReadFile(filepath.Join(dst, "loose.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte("loose"), gotLoose)
+}
+
+func TestEngine_TrailingSlash_CopyContents(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(src, "sub"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "root.txt"), []byte("root"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "sub", "child.txt"), []byte("child"), 0644))
+
+	// Trailing slash: copy contents of src into dst directly.
+	result := Run(context.Background(), Config{
+		Sources:   []string{src + "/"},
+		Dst:       dst,
+		Recursive: true,
+		Workers:   2,
+	})
+
+	require.NoError(t, result.Err)
+
+	// Files should be directly in dst, not dst/src/.
+	gotRoot, err := os.ReadFile(filepath.Join(dst, "root.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte("root"), gotRoot)
+
+	gotChild, err := os.ReadFile(filepath.Join(dst, "sub", "child.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte("child"), gotChild)
+
+	// dst/src/ should NOT exist.
+	_, err = os.Stat(filepath.Join(dst, "src"))
+	assert.True(t, os.IsNotExist(err), "dst/src/ should not exist with trailing slash")
+}
+
+func TestEngine_NoTrailingSlash_CopyDir(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(src, "sub"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "root.txt"), []byte("root"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "sub", "child.txt"), []byte("child"), 0644))
+
+	// No trailing slash: copy dir itself into dst, creating dst/src/.
+	result := Run(context.Background(), Config{
+		Sources:   []string{src},
+		Dst:       dst,
+		Recursive: true,
+		Workers:   2,
+	})
+
+	require.NoError(t, result.Err)
+
+	// Files should be under dst/src/.
+	gotRoot, err := os.ReadFile(filepath.Join(dst, "src", "root.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte("root"), gotRoot)
+
+	gotChild, err := os.ReadFile(filepath.Join(dst, "src", "sub", "child.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte("child"), gotChild)
+}
+
+func TestEngine_MultiSourceDstMustBeDir(t *testing.T) {
+	dir := t.TempDir()
+
+	file1 := filepath.Join(dir, "file1.txt")
+	file2 := filepath.Join(dir, "file2.txt")
+	dstFile := filepath.Join(dir, "dst.txt")
+
+	require.NoError(t, os.WriteFile(file1, []byte("a"), 0644))
+	require.NoError(t, os.WriteFile(file2, []byte("b"), 0644))
+	require.NoError(t, os.WriteFile(dstFile, []byte("existing"), 0644))
+
+	// Multiple sources to an existing file destination should error.
+	result := Run(context.Background(), Config{
+		Sources: []string{file1, file2},
+		Dst:     dstFile,
+		Workers: 1,
+	})
+
+	assert.Error(t, result.Err)
+	assert.Contains(t, result.Err.Error(), "not a directory")
 }

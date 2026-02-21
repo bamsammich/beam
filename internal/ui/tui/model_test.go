@@ -15,11 +15,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func newTestModel() Model {
+func newTestModel() (Model, *stats.Collector) {
 	ch := make(chan event.Event, 10)
 	c := stats.NewCollector()
 	c.SetTotals(100, 1024*1024*1024)
-	return NewModel(ch, c, 8, "/dst", "/src", nil)
+	return NewModel(ch, c, 8, "/dst", "/src", nil), c
 }
 
 func newTestModelWithThrottle() Model {
@@ -32,13 +32,13 @@ func newTestModelWithThrottle() Model {
 }
 
 func TestModel_Init(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	cmd := m.Init()
 	assert.NotNil(t, cmd)
 }
 
 func TestModel_KeyQ_Quits(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
 	model := updated.(Model)
 	assert.True(t, model.quitting)
@@ -46,14 +46,14 @@ func TestModel_KeyQ_Quits(t *testing.T) {
 }
 
 func TestModel_KeyR_SwitchesToRate(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
 	model := updated.(Model)
 	assert.Equal(t, viewRate, model.mode)
 }
 
 func TestModel_KeyF_SwitchesToFeed(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	m.mode = viewRate
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
 	model := updated.(Model)
@@ -61,7 +61,7 @@ func TestModel_KeyF_SwitchesToFeed(t *testing.T) {
 }
 
 func TestModel_KeyE_SwitchesToFeed(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	m.mode = viewRate
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
 	model := updated.(Model)
@@ -69,14 +69,14 @@ func TestModel_KeyE_SwitchesToFeed(t *testing.T) {
 }
 
 func TestModel_KeyP_ShowsNotImplemented(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
 	model := updated.(Model)
 	assert.Contains(t, model.statusMsg, "not yet implemented")
 }
 
 func TestModel_WindowResize(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
 	model := updated.(Model)
 	assert.Equal(t, 120, model.width)
@@ -84,7 +84,7 @@ func TestModel_WindowResize(t *testing.T) {
 }
 
 func TestModel_EngineEvent(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	ev := engineEventMsg(event.Event{
 		Type:     event.FileStarted,
 		Path:     "/dst/test.txt",
@@ -100,7 +100,7 @@ func TestModel_EngineEvent(t *testing.T) {
 }
 
 func TestModel_ChannelDone_StaysOpen(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	updated, cmd := m.Update(channelDoneMsg{})
 	model := updated.(Model)
 	assert.True(t, model.done)
@@ -109,9 +109,9 @@ func TestModel_ChannelDone_StaysOpen(t *testing.T) {
 }
 
 func TestModel_Tick(t *testing.T) {
-	m := newTestModel()
-	m.stats.AddFilesCopied(5)
-	m.stats.AddBytesCopied(1024 * 1024)
+	m, c := newTestModel()
+	c.AddFilesCopied(5)
+	c.AddBytesCopied(1024 * 1024)
 
 	updated, cmd := m.Update(tickMsg(time.Now()))
 	model := updated.(Model)
@@ -120,7 +120,7 @@ func TestModel_Tick(t *testing.T) {
 }
 
 func TestModel_ViewFeed(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	m.width = 80
 	m.height = 30
 	out := m.View()
@@ -129,7 +129,7 @@ func TestModel_ViewFeed(t *testing.T) {
 }
 
 func TestModel_ViewRate(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	m.mode = viewRate
 	m.width = 80
 	m.height = 30
@@ -142,14 +142,14 @@ func TestModel_ViewRate(t *testing.T) {
 }
 
 func TestModel_ViewQuitting(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	m.quitting = true
 	out := m.View()
 	assert.Empty(t, out)
 }
 
 func TestModel_ScrollKeys(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	// Add some completed entries.
 	for i := range 10 {
 		m.feed.handleEvent(event.Event{
@@ -178,7 +178,7 @@ func TestModel_ScrollKeys(t *testing.T) {
 }
 
 func TestModel_SaveModal_ActivatesOnlyWhenDone(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	m.done = false
 
 	// s should do nothing when not done.
@@ -196,7 +196,7 @@ func TestModel_SaveModal_ActivatesOnlyWhenDone(t *testing.T) {
 }
 
 func TestModel_SaveModal_EscCancels(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	m.done = true
 	m.save.active = true
 	m.save.input = "test.log"
@@ -207,7 +207,7 @@ func TestModel_SaveModal_EscCancels(t *testing.T) {
 }
 
 func TestModel_SaveModal_TextInput(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	m.save.active = true
 	m.save.input = ""
 	m.save.cursor = 0
@@ -230,7 +230,7 @@ func TestModel_SaveModal_TextInput(t *testing.T) {
 }
 
 func TestModel_SaveModal_WritesFile(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	m.done = true
 	m.srcRoot = "/src"
 	m.dstRoot = "/dst"
@@ -262,7 +262,7 @@ func TestModel_SaveModal_WritesFile(t *testing.T) {
 }
 
 func TestModel_FooterChangesWhenDone(t *testing.T) {
-	m := newTestModel()
+	m, _ := newTestModel()
 	m.done = false
 	footer := m.renderFooter()
 	assert.Contains(t, footer, "workers")
@@ -290,7 +290,7 @@ func TestModel_WorkerAdjust_WithThrottle(t *testing.T) {
 }
 
 func TestModel_WorkerAdjust_WithoutThrottle(t *testing.T) {
-	m := newTestModel() // no throttle
+	m, _ := newTestModel() // no throttle
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'+'}})
 	model := updated.(Model)
 	assert.Contains(t, model.statusMsg, "not available")

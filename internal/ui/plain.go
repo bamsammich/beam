@@ -13,7 +13,7 @@ import (
 type plainPresenter struct {
 	w       io.Writer
 	errW    io.Writer
-	stats   *stats.Collector
+	stats   stats.Reader
 	dstRoot string
 }
 
@@ -37,8 +37,6 @@ func (p *plainPresenter) Run(events <-chan Event) error {
 func (p *plainPresenter) handleEvent(ev Event) {
 	path := StripRoot(p.dstRoot, ev.Path)
 	switch ev.Type {
-	case ScanComplete:
-		p.stats.SetTotals(ev.Total, ev.TotalSize)
 	case FileCompleted:
 		speed := p.stats.RollingSpeed(5)
 		fmt.Fprintf(p.w, "%s  %s  %s\n", path, FormatBytes(ev.Size), FormatRate(speed))

@@ -3,8 +3,11 @@ package engine
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -16,7 +19,7 @@ import (
 
 // Config describes a copy operation.
 type Config struct {
-	Src            string
+	Sources        []string
 	Dst            string
 	Recursive      bool
 	Archive        bool
@@ -28,7 +31,7 @@ type Config struct {
 	Quiet          bool
 	UseIOURing     bool
 	Events         chan<- event.Event // nil = no events emitted
-	Stats          *stats.Collector  // nil = engine creates its own
+	Stats          stats.ReadWriter  // nil = engine creates its own
 	Filter         *filter.Chain     // nil = no filtering
 	Delete         bool              // delete extraneous files from destination
 	Verify         bool              // post-copy BLAKE3 checksum verification
@@ -53,19 +56,77 @@ type Result struct {
 	Err   error
 }
 
+// resolvedSource represents a single source after resolving trailing-slash
+// semantics and computing the destination base path.
+type resolvedSource struct {
+	srcPath      string      // absolute, cleaned path
+	dstBase      string      // computed destination for this source
+	isFile       bool
+	copyContents bool // trailing slash on dir = copy contents, not dir itself
+	info         os.FileInfo
+}
+
+// resolveSources resolves each raw source argument into a resolvedSource,
+// applying rsync-compatible trailing-slash semantics:
+//   - dir/  → copy contents of dir into dst
+//   - dir   → copy dir itself into dst (creates dst/dir/)
+//   - file  → copy file into dst
+func resolveSources(sources []string, dst string, recursive bool) ([]resolvedSource, error) {
+	resolved := make([]resolvedSource, 0, len(sources))
+
+	for _, raw := range sources {
+		// Detect trailing slash before filepath.Clean strips it.
+		hasTrailingSlash := strings.HasSuffix(raw, string(filepath.Separator)) ||
+			strings.HasSuffix(raw, "/")
+
+		cleaned := filepath.Clean(raw)
+		info, err := os.Lstat(cleaned)
+		if err != nil {
+			return nil, fmt.Errorf("source: %w", err)
+		}
+
+		rs := resolvedSource{
+			srcPath: cleaned,
+			info:    info,
+			isFile:  !info.IsDir(),
+		}
+
+		if info.IsDir() {
+			if !recursive {
+				return nil, fmt.Errorf("source %s is a directory (use -r or -a)", cleaned)
+			}
+			if hasTrailingSlash {
+				// dir/ → copy contents into dst directly
+				rs.copyContents = true
+				rs.dstBase = dst
+			} else {
+				// dir → copy dir itself into dst/basename
+				rs.dstBase = filepath.Join(dst, filepath.Base(cleaned))
+			}
+		} else {
+			// File source: destination is dst/basename (if dst is a dir),
+			// or dst itself (handled later for single-file case).
+			rs.dstBase = filepath.Join(dst, filepath.Base(cleaned))
+		}
+
+		resolved = append(resolved, rs)
+	}
+
+	return resolved, nil
+}
+
 // Run executes a copy operation, blocking until complete.
 func Run(ctx context.Context, cfg Config) Result {
-	// Validate inputs.
-	srcInfo, err := os.Lstat(cfg.Src)
-	if err != nil {
-		return Result{Err: fmt.Errorf("source: %w", err)}
+	if len(cfg.Sources) == 0 {
+		return Result{Err: fmt.Errorf("no sources specified")}
 	}
 
 	// Archive implies recursive + all preserve flags.
 	recursive := cfg.Recursive || cfg.Archive
 
-	if srcInfo.IsDir() && !recursive {
-		return Result{Err: fmt.Errorf("source %s is a directory (use -r or -a)", cfg.Src)}
+	resolved, err := resolveSources(cfg.Sources, cfg.Dst, recursive)
+	if err != nil {
+		return Result{Err: err}
 	}
 
 	collector := cfg.Stats
@@ -73,41 +134,43 @@ func Run(ctx context.Context, cfg Config) Result {
 		collector = stats.NewCollector()
 	}
 
-	if srcInfo.IsDir() {
-		return runDirCopy(ctx, cfg, collector, recursive)
+	// Single file source with no other sources: use optimized file copy path.
+	if len(resolved) == 1 && resolved[0].isFile {
+		return runFileCopy(ctx, cfg, collector, resolved[0])
 	}
-	return runFileCopy(ctx, cfg, collector, srcInfo)
+
+	// Multi-source to non-directory destination check: if dst exists and is a
+	// file, that's an error when we have multiple sources or directory sources.
+	if len(resolved) > 1 {
+		if dstInfo, err := os.Stat(cfg.Dst); err == nil && !dstInfo.IsDir() {
+			return Result{Err: fmt.Errorf("destination %s is not a directory (multiple sources require a directory destination)", cfg.Dst)}
+		}
+	}
+
+	return runMultiSourceCopy(ctx, cfg, collector, resolved)
 }
 
-func runDirCopy(ctx context.Context, cfg Config, collector *stats.Collector, recursive bool) Result {
-	// Ensure destination root exists.
-	if err := os.MkdirAll(cfg.Dst, 0755); err != nil {
-		return Result{Err: fmt.Errorf("create destination: %w", err)}
-	}
-
+func runMultiSourceCopy(ctx context.Context, cfg Config, collector stats.ReadWriter, sources []resolvedSource) Result {
 	var copyErr error
 
-	// Prescan: quickly count files and bytes for accurate progress display.
-	// This only does readdir+lstat (no file opens), so it's very fast.
-	totalFiles, totalBytes := Prescan(ctx, cfg.Src, cfg.Filter)
+	// Prescan all directory sources for progress totals.
+	var totalFiles, totalBytes int64
+	for _, rs := range sources {
+		if rs.isFile {
+			totalFiles++
+			totalBytes += rs.info.Size()
+		} else {
+			f, b := Prescan(ctx, rs.srcPath, cfg.Filter)
+			totalFiles += f
+			totalBytes += b
+		}
+	}
 	collector.SetTotals(totalFiles, totalBytes)
 	cfg.emit(event.Event{
 		Type:      event.ScanComplete,
 		Total:     totalFiles,
 		TotalSize: totalBytes,
 	})
-
-	scanCfg := ScannerConfig{
-		SrcRoot:        cfg.Src,
-		DstRoot:        cfg.Dst,
-		Workers:        cfg.ScanWorkers,
-		ChunkThreshold: cfg.ChunkThreshold,
-		SparseDetect:   true,
-		IncludeXattrs:  cfg.Archive,
-		Events:         cfg.Events,
-		Filter:         cfg.Filter,
-		Stats:          collector,
-	}
 
 	workerCfg := WorkerConfig{
 		NumWorkers:    cfg.Workers,
@@ -124,30 +187,102 @@ func runDirCopy(ctx context.Context, cfg Config, collector *stats.Collector, rec
 		WorkerLimit:   cfg.WorkerLimit,
 	}
 
-	scanner := NewScanner(scanCfg)
-	tasks, scanErrs := scanner.Scan(ctx)
-
 	wp, err := NewWorkerPool(workerCfg)
 	if err != nil {
 		return Result{Err: fmt.Errorf("create worker pool: %w", err)}
 	}
 	defer wp.Close()
 
-	// Collect errors from both scanner and workers.
+	// Merged task channel: all sources feed into one channel consumed by the
+	// shared worker pool. Directory sources are scanned sequentially but the
+	// workers stay busy processing tasks from the previous source.
+	allTasks := make(chan FileTask, cfg.Workers*2)
 	allErrs := make(chan error, 64)
 
-	// Drain scanner errors in a goroutine.
+	var feedWg sync.WaitGroup
+	feedWg.Add(1)
 	go func() {
-		for err := range scanErrs {
-			select {
-			case allErrs <- err:
-			default:
+		defer feedWg.Done()
+		defer close(allTasks)
+
+		for _, rs := range sources {
+			if ctx.Err() != nil {
+				return
 			}
+
+			if rs.isFile {
+				// File source: emit a single task directly.
+				task, err := fileInfoToTask(rs.srcPath, rs.dstBase, rs.info)
+				if err != nil {
+					select {
+					case allErrs <- err:
+					default:
+					}
+					continue
+				}
+				select {
+				case allTasks <- task:
+				case <-ctx.Done():
+					return
+				}
+				continue
+			}
+
+			// Directory source: ensure destination exists and run scanner.
+			if err := os.MkdirAll(rs.dstBase, 0755); err != nil {
+				select {
+				case allErrs <- fmt.Errorf("create destination %s: %w", rs.dstBase, err):
+				default:
+				}
+				continue
+			}
+
+			scanCfg := ScannerConfig{
+				SrcRoot:        rs.srcPath,
+				DstRoot:        rs.dstBase,
+				Workers:        cfg.ScanWorkers,
+				ChunkThreshold: cfg.ChunkThreshold,
+				SparseDetect:   true,
+				IncludeXattrs:  cfg.Archive,
+				Events:         cfg.Events,
+				Filter:         cfg.Filter,
+				Stats:          collector,
+			}
+
+			scanner := NewScanner(scanCfg)
+			tasks, scanErrs := scanner.Scan(ctx)
+
+			// Drain scanner errors in background.
+			var scanErrWg sync.WaitGroup
+			scanErrWg.Add(1)
+			go func() {
+				defer scanErrWg.Done()
+				for err := range scanErrs {
+					select {
+					case allErrs <- err:
+					default:
+					}
+				}
+			}()
+
+			// Drain tasks into the merged channel.
+			for task := range tasks {
+				select {
+				case allTasks <- task:
+				case <-ctx.Done():
+					scanErrWg.Wait()
+					return
+				}
+			}
+			scanErrWg.Wait()
 		}
 	}()
 
-	// Run workers (blocks until all tasks processed).
-	wp.Run(ctx, tasks, allErrs)
+	// Run workers (blocks until allTasks is closed and all tasks processed).
+	wp.Run(ctx, allTasks, allErrs)
+
+	// Wait for the feed goroutine (should already be done since allTasks is closed).
+	feedWg.Wait()
 
 	// Close and drain error channel.
 	close(allErrs)
@@ -163,32 +298,56 @@ func runDirCopy(ctx context.Context, cfg Config, collector *stats.Collector, rec
 		copyErr = fmt.Errorf("%w (and %d more errors)", copyErr, errCount-1)
 	}
 
-	// Delete extraneous files from destination.
+	// Delete extraneous files from destination (per source-dst pair).
 	if cfg.Delete {
-		delCfg := DeleteConfig{
-			SrcRoot: cfg.Src,
-			DstRoot: cfg.Dst,
-			Filter:  cfg.Filter,
-			DryRun:  cfg.DryRun,
-			Events:  cfg.Events,
+		// Detect overlapping destinations: if multiple sources map to the same
+		// dstBase, skip delete with a warning to avoid incorrect deletions.
+		dstCounts := make(map[string]int)
+		for _, rs := range sources {
+			if !rs.isFile {
+				dstCounts[rs.dstBase]++
+			}
 		}
-		if _, err := DeleteExtraneous(ctx, delCfg); err != nil && copyErr == nil {
-			copyErr = err
+
+		for _, rs := range sources {
+			if rs.isFile {
+				continue
+			}
+			if dstCounts[rs.dstBase] > 1 {
+				slog.Warn("skipping --delete for overlapping destination",
+					"src", rs.srcPath, "dst", rs.dstBase)
+				continue
+			}
+			delCfg := DeleteConfig{
+				SrcRoot: rs.srcPath,
+				DstRoot: rs.dstBase,
+				Filter:  cfg.Filter,
+				DryRun:  cfg.DryRun,
+				Events:  cfg.Events,
+			}
+			if _, err := DeleteExtraneous(ctx, delCfg); err != nil && copyErr == nil {
+				copyErr = err
+			}
 		}
 	}
 
-	// Post-copy verification.
+	// Post-copy verification (per source-dst pair).
 	if cfg.Verify && !cfg.DryRun {
-		vr := Verify(ctx, VerifyConfig{
-			SrcRoot: cfg.Src,
-			DstRoot: cfg.Dst,
-			Workers: cfg.Workers,
-			Filter:  cfg.Filter,
-			Events:  cfg.Events,
-			Stats:   collector,
-		})
-		if vr.Failed > 0 && copyErr == nil {
-			copyErr = fmt.Errorf("%d files failed verification", vr.Failed)
+		for _, rs := range sources {
+			if rs.isFile {
+				continue
+			}
+			vr := Verify(ctx, VerifyConfig{
+				SrcRoot: rs.srcPath,
+				DstRoot: rs.dstBase,
+				Workers: cfg.Workers,
+				Filter:  cfg.Filter,
+				Events:  cfg.Events,
+				Stats:   collector,
+			})
+			if vr.Failed > 0 && copyErr == nil {
+				copyErr = fmt.Errorf("%d files failed verification", vr.Failed)
+			}
 		}
 	}
 
@@ -198,12 +357,15 @@ func runDirCopy(ctx context.Context, cfg Config, collector *stats.Collector, rec
 	}
 }
 
-func runFileCopy(ctx context.Context, cfg Config, collector *stats.Collector, srcInfo os.FileInfo) Result {
-	dst := cfg.Dst
+func runFileCopy(ctx context.Context, cfg Config, collector stats.ReadWriter, rs resolvedSource) Result {
+	dst := rs.dstBase
 
 	// If dst is an existing directory, copy into it.
-	if dstInfo, err := os.Stat(dst); err == nil && dstInfo.IsDir() {
-		dst = filepath.Join(dst, filepath.Base(cfg.Src))
+	if dstInfo, err := os.Stat(cfg.Dst); err == nil && dstInfo.IsDir() {
+		dst = filepath.Join(cfg.Dst, filepath.Base(rs.srcPath))
+	} else if len(cfg.Sources) == 1 {
+		// Single file to non-existing or file destination: use dst directly.
+		dst = cfg.Dst
 	}
 
 	// Ensure parent directory exists.
@@ -232,7 +394,7 @@ func runFileCopy(ctx context.Context, cfg Config, collector *stats.Collector, sr
 	tasks := make(chan FileTask, 1)
 	errs := make(chan error, 1)
 
-	task, err := fileInfoToTask(cfg.Src, dst, srcInfo)
+	task, err := fileInfoToTask(rs.srcPath, dst, rs.info)
 	if err != nil {
 		return Result{Err: err}
 	}

@@ -13,7 +13,7 @@ import (
 
 // Config configures the TUI presenter.
 type Config struct {
-	Stats       *stats.Collector
+	Stats       stats.ReadTicker
 	Workers     int
 	DstRoot     string
 	SrcRoot     string

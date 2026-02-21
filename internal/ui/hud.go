@@ -21,7 +21,7 @@ const (
 // files and a 2-line HUD that redraws in place.
 type hudPresenter struct {
 	w         io.Writer
-	stats     *stats.Collector
+	stats     stats.ReadTicker
 	forceFeed bool
 	forceRate bool
 	workers   int
@@ -87,9 +87,6 @@ func (p *hudPresenter) Run(events <-chan Event) error {
 
 func (p *hudPresenter) handleEvent(ev Event) {
 	switch ev.Type {
-	case ScanComplete:
-		p.stats.SetTotals(ev.Total, ev.TotalSize)
-
 	case FileStarted:
 		p.busyWorkers[ev.WorkerID] = true
 

@@ -19,7 +19,7 @@ type VerifyConfig struct {
 	Workers int
 	Filter  *filter.Chain
 	Events  chan<- event.Event
-	Stats   *stats.Collector
+	Stats   stats.Writer
 }
 
 // VerifyResult holds the outcome of a verification pass.
