@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -23,12 +24,13 @@ type WorkerConfig struct {
 	PreserveTimes bool
 	PreserveOwner bool
 	PreserveXattr bool
+	NoTimes       bool // disable all time preservation including default mtime
 	DryRun        bool
 	UseIOURing    bool
 	Stats         *stats.Collector
 	Events        chan<- event.Event
-	Checkpoint    *CheckpointDB
-	DstRoot       string // destination root for computing relative paths
+	DstRoot       string        // destination root for computing relative paths
+	WorkerLimit   *atomic.Int32 // runtime throttle; nil = all workers active
 }
 
 // WorkerPool manages a pool of copy workers.
@@ -61,6 +63,10 @@ func (wp *WorkerPool) Run(ctx context.Context, tasks <-chan FileTask, errs chan<
 		go func() {
 			defer wg.Done()
 			for task := range tasks {
+				// Throttle: wait if this worker's ID is at or above the limit.
+				if !wp.waitForThrottle(ctx, i) {
+					return
+				}
 				select {
 				case <-ctx.Done():
 					return
@@ -76,6 +82,22 @@ func (wp *WorkerPool) Run(ctx context.Context, tasks <-chan FileTask, errs chan<
 		}()
 	}
 	wg.Wait()
+}
+
+// waitForThrottle blocks until this worker is allowed to proceed.
+// Returns false if the context was cancelled.
+func (wp *WorkerPool) waitForThrottle(ctx context.Context, workerID int) bool {
+	if wp.cfg.WorkerLimit == nil {
+		return true
+	}
+	for int32(workerID) >= wp.cfg.WorkerLimit.Load() {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	return true
 }
 
 func (wp *WorkerPool) emit(e event.Event) {
@@ -240,15 +262,6 @@ func (wp *WorkerPool) copyRegularFile(ctx context.Context, task FileTask, worker
 	wp.cfg.Stats.AddBytesCopied(totalBytes)
 	wp.emit(event.Event{Type: event.FileCompleted, Path: task.DstPath, Size: totalBytes, WorkerID: workerID})
 
-	// Record in checkpoint for resume support.
-	if wp.cfg.Checkpoint != nil {
-		relPath, _ := filepath.Rel(wp.cfg.DstRoot, task.DstPath)
-		hash, err := HashFile(task.DstPath)
-		if err == nil {
-			_ = wp.cfg.Checkpoint.MarkCompleted(relPath, task.Size, hash, task.ModTime.UnixNano())
-		}
-	}
-
 	return nil
 }
 
@@ -330,9 +343,15 @@ func (wp *WorkerPool) setFileMetadata(task FileTask, fd *os.File) error {
 		}
 	}
 
-	if wp.cfg.PreserveTimes {
+	// Always preserve mtime so skip detection (size + mtime) works on re-runs.
+	// In archive mode, also preserve atime. --no-times disables both.
+	if !wp.cfg.NoTimes {
+		atime := unix.Timespec{Nsec: unix.UTIME_OMIT}
+		if wp.cfg.PreserveTimes {
+			atime = unix.NsecToTimespec(task.AccTime.UnixNano())
+		}
 		times := []unix.Timespec{
-			unix.NsecToTimespec(task.AccTime.UnixNano()),
+			atime,
 			unix.NsecToTimespec(task.ModTime.UnixNano()),
 		}
 		if err := unix.UtimesNanoAt(rawFd, "", times, unix.AT_EMPTY_PATH); err != nil {

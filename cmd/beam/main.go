@@ -8,13 +8,16 @@ import (
 	"os/signal"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"syscall"
 
+	"github.com/bamsammich/beam/internal/config"
 	"github.com/bamsammich/beam/internal/engine"
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/filter"
 	"github.com/bamsammich/beam/internal/stats"
 	"github.com/bamsammich/beam/internal/ui"
+	"github.com/bamsammich/beam/internal/ui/tui"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 )
@@ -56,9 +59,10 @@ func run() int {
 		forceFeed      bool
 		forceRate      bool
 		noProgress     bool
+		tuiFlag        bool
 		deleteFlag     bool
 		verifyFlag     bool
-		noResume       bool
+		noTimes        bool
 		filterFile     string
 		minSizeStr     string
 		maxSizeStr     string
@@ -85,6 +89,15 @@ func run() int {
 
 			src := args[0]
 			dst := args[1]
+
+			// Load optional config file.
+			cfg, err := config.Load()
+			if err != nil {
+				slog.Warn("failed to load config", "error", err)
+			}
+
+			// Apply config defaults for flags not explicitly set on CLI.
+			applyConfigDefaults(cmd, cfg.Defaults, &verifyFlag, &workers, &tuiFlag, &archive)
 
 			// Configure logging.
 			logLevel := slog.LevelWarn
@@ -140,31 +153,42 @@ func run() int {
 			// Create events channel.
 			events := make(chan event.Event, 256)
 
+			// Create worker throttle.
+			workerLimit := &atomic.Int32{}
+			workerLimit.Store(int32(workers))
+
 			// Create presenter.
 			isTTY := ui.IsTTY(os.Stderr.Fd())
-			presenter := ui.NewPresenter(ui.Config{
-				Writer:     os.Stdout,
-				ErrWriter:  os.Stderr,
-				IsTTY:      isTTY,
-				Quiet:      quiet,
-				Verbose:    verbose,
-				ForceFeed:  forceFeed,
-				ForceRate:  forceRate,
-				NoProgress: noProgress,
-				Stats:      collector,
-				Workers:    workers,
-				DstRoot:    dst,
-			})
+			var presenter ui.Presenter
+			if tuiFlag && isTTY {
+				presenter = tui.NewPresenter(tui.Config{
+					Stats:       collector,
+					Workers:     workers,
+					DstRoot:     dst,
+					SrcRoot:     src,
+					Theme:       cfg.Theme,
+					WorkerLimit: workerLimit,
+				})
+			} else {
+				if tuiFlag {
+					slog.Warn("--tui requires a terminal, falling back to inline output")
+				}
+				presenter = ui.NewPresenter(ui.Config{
+					Writer:     os.Stdout,
+					ErrWriter:  os.Stderr,
+					IsTTY:      isTTY,
+					Quiet:      quiet,
+					Verbose:    verbose,
+					ForceFeed:  forceFeed,
+					ForceRate:  forceRate,
+					NoProgress: noProgress,
+					Stats:      collector,
+					Workers:    workers,
+					DstRoot:    dst,
+				})
+			}
 
-			// Start presenter goroutine.
-			var presenterWg sync.WaitGroup
-			presenterWg.Add(1)
-			go func() {
-				defer presenterWg.Done()
-				_ = presenter.Run(events)
-			}()
-
-			cfg := engine.Config{
+			engineCfg := engine.Config{
 				Src:            src,
 				Dst:            dst,
 				Recursive:      recursive,
@@ -179,12 +203,13 @@ func run() int {
 				Stats:          collector,
 				Delete:         deleteFlag,
 				Verify:         verifyFlag,
-				NoResume:       noResume,
+				NoTimes:        noTimes,
+				WorkerLimit:    workerLimit,
 			}
 
 			// Only set filter if it has rules/size constraints.
 			if !chain.Empty() {
-				cfg.Filter = chain
+				engineCfg.Filter = chain
 			}
 
 			slog.Debug("starting copy",
@@ -196,11 +221,44 @@ func run() int {
 				"iouring", useIOURing,
 			)
 
-			result := engine.Run(ctx, cfg)
+			useTUI := tuiFlag && isTTY
+			var result engine.Result
 
-			// Close events channel so presenter finishes.
-			close(events)
-			presenterWg.Wait()
+			if useTUI {
+				// TUI mode: run engine in background, TUI in foreground.
+				// Bubble Tea needs the foreground to capture stdin properly.
+				engineCtx, engineCancel := context.WithCancel(ctx)
+				defer engineCancel()
+
+				var engineWg sync.WaitGroup
+				engineWg.Add(1)
+				go func() {
+					defer engineWg.Done()
+					result = engine.Run(engineCtx, engineCfg)
+					close(events)
+				}()
+
+				// TUI runs in foreground — blocks until user quits.
+				_ = presenter.Run(events)
+
+				// User quit the TUI — cancel engine if still running.
+				engineCancel()
+				engineWg.Wait()
+				stop()
+			} else {
+				// Inline mode: run presenter in background, engine in foreground.
+				var presenterWg sync.WaitGroup
+				presenterWg.Add(1)
+				go func() {
+					defer presenterWg.Done()
+					_ = presenter.Run(events)
+				}()
+
+				result = engine.Run(ctx, engineCfg)
+				stop()
+				close(events)
+				presenterWg.Wait()
+			}
 
 			if !quiet {
 				summary := presenter.Summary()
@@ -235,6 +293,7 @@ func run() int {
 	rootCmd.Flags().BoolVar(&forceFeed, "feed", false, "force feed mode (one line per file)")
 	rootCmd.Flags().BoolVar(&forceRate, "rate", false, "force rate mode (sparkline + throughput)")
 	rootCmd.Flags().BoolVar(&noProgress, "no-progress", false, "disable progress display")
+	rootCmd.Flags().BoolVar(&tuiFlag, "tui", false, "full-screen TUI (Bubble Tea) for large transfers")
 
 	// Filter flags — use custom pflag.Value to preserve CLI ordering.
 	rootCmd.Flags().VarP(&filterFlag{chain: chain, include: false}, "exclude", "", "exclude files matching PATTERN (repeatable)")
@@ -242,7 +301,7 @@ func run() int {
 	rootCmd.Flags().StringVar(&filterFile, "filter", "", "read filter rules from FILE")
 	rootCmd.Flags().BoolVar(&deleteFlag, "delete", false, "delete extraneous files from destination")
 	rootCmd.Flags().BoolVar(&verifyFlag, "verify", false, "verify checksums after copy (BLAKE3)")
-	rootCmd.Flags().BoolVar(&noResume, "no-resume", false, "disable resume/checkpoint")
+	rootCmd.Flags().BoolVar(&noTimes, "no-times", false, "don't preserve mtime (disables skip detection on re-runs)")
 	rootCmd.Flags().StringVar(&minSizeStr, "min-size", "", "skip files smaller than SIZE (e.g. 1M, 100K)")
 	rootCmd.Flags().StringVar(&maxSizeStr, "max-size", "", "skip files larger than SIZE (e.g. 1G, 500M)")
 
@@ -264,6 +323,22 @@ func run() int {
 	}
 
 	return 0
+}
+
+// applyConfigDefaults applies config file defaults for flags not explicitly set on the CLI.
+func applyConfigDefaults(cmd *cobra.Command, defaults config.DefaultsConfig, verify *bool, workers *int, tuiFlag *bool, archive *bool) {
+	if !cmd.Flags().Changed("verify") && defaults.Verify != nil {
+		*verify = *defaults.Verify
+	}
+	if !cmd.Flags().Changed("workers") && defaults.Workers != nil {
+		*workers = *defaults.Workers
+	}
+	if !cmd.Flags().Changed("tui") && defaults.TUI != nil {
+		*tuiFlag = *defaults.TUI
+	}
+	if !cmd.Flags().Changed("archive") && defaults.Archive != nil {
+		*archive = *defaults.Archive
+	}
 }
 
 type exitError struct {

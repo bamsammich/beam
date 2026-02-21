@@ -83,5 +83,5 @@ func (p *plainPresenter) printProgress() {
 }
 
 func (p *plainPresenter) Summary() string {
-	return completionSummary(p.stats.Snapshot())
+	return CompletionSummary(p.stats.Snapshot())
 }

@@ -6,9 +6,9 @@ import (
 	"github.com/bamsammich/beam/internal/stats"
 )
 
-// completionSummary builds a final summary line from a snapshot.
+// CompletionSummary builds a final summary line from a snapshot.
 // Format: done ✓  files 48,917  size 2.1 GB  avg 641 MB/s  time 3m 17s  errors 0
-func completionSummary(snap stats.Snapshot) string {
+func CompletionSummary(snap stats.Snapshot) string {
 	avgSpeed := 0.0
 	if snap.Elapsed.Seconds() > 0 {
 		avgSpeed = float64(snap.BytesCopied) / snap.Elapsed.Seconds()

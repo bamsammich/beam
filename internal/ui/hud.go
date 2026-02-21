@@ -257,7 +257,7 @@ func (p *hudPresenter) clearHUD() {
 }
 
 func (p *hudPresenter) Summary() string {
-	return completionSummary(p.stats.Snapshot())
+	return CompletionSummary(p.stats.Snapshot())
 }
 
 // relPath strips the dstRoot prefix from an absolute path to produce a

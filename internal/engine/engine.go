@@ -3,9 +3,9 @@ package engine
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -27,12 +27,13 @@ type Config struct {
 	Verbose        bool
 	Quiet          bool
 	UseIOURing     bool
-	Events         chan<- event.Event  // nil = no events emitted
-	Stats          *stats.Collector   // nil = engine creates its own
-	Filter         *filter.Chain      // nil = no filtering
-	Delete         bool               // delete extraneous files from destination
-	Verify         bool               // post-copy BLAKE3 checksum verification
-	NoResume       bool               // disable resume/checkpoint
+	Events         chan<- event.Event // nil = no events emitted
+	Stats          *stats.Collector  // nil = engine creates its own
+	Filter         *filter.Chain     // nil = no filtering
+	Delete         bool              // delete extraneous files from destination
+	Verify         bool              // post-copy BLAKE3 checksum verification
+	NoTimes        bool              // disable mtime preservation (disables skip detection)
+	WorkerLimit    *atomic.Int32     // runtime worker throttle; nil = no throttling
 }
 
 func (c Config) emit(e event.Event) {
@@ -86,23 +87,6 @@ func runDirCopy(ctx context.Context, cfg Config, collector *stats.Collector, rec
 
 	var copyErr error
 
-	// Open checkpoint DB for resume support.
-	var checkpoint *CheckpointDB
-	if !cfg.NoResume && !cfg.DryRun {
-		var err error
-		checkpoint, err = OpenCheckpoint(cfg.Src, cfg.Dst)
-		if err != nil {
-			slog.Warn("checkpoint unavailable, proceeding without resume", "error", err)
-		} else {
-			defer func() {
-				if copyErr == nil && !cfg.Verify {
-					checkpoint.Remove()
-				}
-				checkpoint.Close()
-			}()
-		}
-	}
-
 	// Prescan: quickly count files and bytes for accurate progress display.
 	// This only does readdir+lstat (no file opens), so it's very fast.
 	totalFiles, totalBytes := Prescan(ctx, cfg.Src, cfg.Filter)
@@ -122,22 +106,22 @@ func runDirCopy(ctx context.Context, cfg Config, collector *stats.Collector, rec
 		IncludeXattrs:  cfg.Archive,
 		Events:         cfg.Events,
 		Filter:         cfg.Filter,
-		Checkpoint:     checkpoint,
 		Stats:          collector,
 	}
 
 	workerCfg := WorkerConfig{
 		NumWorkers:    cfg.Workers,
 		PreserveMode:  cfg.Archive,
-		PreserveTimes: cfg.Archive,
+		PreserveTimes: cfg.Archive && !cfg.NoTimes,
 		PreserveOwner: cfg.Archive,
 		PreserveXattr: cfg.Archive,
+		NoTimes:       cfg.NoTimes,
 		DryRun:        cfg.DryRun,
 		UseIOURing:    cfg.UseIOURing,
 		Stats:         collector,
 		Events:        cfg.Events,
-		Checkpoint:    checkpoint,
 		DstRoot:       cfg.Dst,
+		WorkerLimit:   cfg.WorkerLimit,
 	}
 
 	scanner := NewScanner(scanCfg)
@@ -230,9 +214,10 @@ func runFileCopy(ctx context.Context, cfg Config, collector *stats.Collector, sr
 	workerCfg := WorkerConfig{
 		NumWorkers:    1,
 		PreserveMode:  cfg.Archive,
-		PreserveTimes: cfg.Archive,
+		PreserveTimes: cfg.Archive && !cfg.NoTimes,
 		PreserveOwner: cfg.Archive,
 		PreserveXattr: cfg.Archive,
+		NoTimes:       cfg.NoTimes,
 		DryRun:        cfg.DryRun,
 		UseIOURing:    cfg.UseIOURing,
 		Stats:         collector,
