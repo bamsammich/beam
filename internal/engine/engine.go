@@ -6,7 +6,10 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
+	"github.com/bamsammich/beam/internal/event"
+	"github.com/bamsammich/beam/internal/filter"
 	"github.com/bamsammich/beam/internal/stats"
 )
 
@@ -23,6 +26,21 @@ type Config struct {
 	Verbose        bool
 	Quiet          bool
 	UseIOURing     bool
+	Events         chan<- event.Event  // nil = no events emitted
+	Stats          *stats.Collector   // nil = engine creates its own
+	Filter         *filter.Chain      // nil = no filtering
+	Delete         bool               // delete extraneous files from destination
+}
+
+func (c Config) emit(e event.Event) {
+	if c.Events == nil {
+		return
+	}
+	e.Timestamp = time.Now()
+	select {
+	case c.Events <- e:
+	default: // never block engine
+	}
 }
 
 // Result is the outcome of a copy operation.
@@ -46,7 +64,10 @@ func Run(ctx context.Context, cfg Config) Result {
 		return Result{Err: fmt.Errorf("source %s is a directory (use -r or -a)", cfg.Src)}
 	}
 
-	collector := &stats.Collector{}
+	collector := cfg.Stats
+	if collector == nil {
+		collector = stats.NewCollector()
+	}
 
 	if srcInfo.IsDir() {
 		return runDirCopy(ctx, cfg, collector, recursive)
@@ -60,6 +81,16 @@ func runDirCopy(ctx context.Context, cfg Config, collector *stats.Collector, rec
 		return Result{Err: fmt.Errorf("create destination: %w", err)}
 	}
 
+	// Prescan: quickly count files and bytes for accurate progress display.
+	// This only does readdir+lstat (no file opens), so it's very fast.
+	totalFiles, totalBytes := Prescan(ctx, cfg.Src, cfg.Filter)
+	collector.SetTotals(totalFiles, totalBytes)
+	cfg.emit(event.Event{
+		Type:      event.ScanComplete,
+		Total:     totalFiles,
+		TotalSize: totalBytes,
+	})
+
 	scanCfg := ScannerConfig{
 		SrcRoot:        cfg.Src,
 		DstRoot:        cfg.Dst,
@@ -67,6 +98,8 @@ func runDirCopy(ctx context.Context, cfg Config, collector *stats.Collector, rec
 		ChunkThreshold: cfg.ChunkThreshold,
 		SparseDetect:   true,
 		IncludeXattrs:  cfg.Archive,
+		Events:         cfg.Events,
+		Filter:         cfg.Filter,
 	}
 
 	workerCfg := WorkerConfig{
@@ -78,6 +111,7 @@ func runDirCopy(ctx context.Context, cfg Config, collector *stats.Collector, rec
 		DryRun:        cfg.DryRun,
 		UseIOURing:    cfg.UseIOURing,
 		Stats:         collector,
+		Events:        cfg.Events,
 	}
 
 	scanner := NewScanner(scanCfg)
@@ -118,6 +152,20 @@ func runDirCopy(ctx context.Context, cfg Config, collector *stats.Collector, rec
 
 	if errCount > 1 {
 		copyErr = fmt.Errorf("%w (and %d more errors)", copyErr, errCount-1)
+	}
+
+	// Delete extraneous files from destination.
+	if cfg.Delete {
+		delCfg := DeleteConfig{
+			SrcRoot: cfg.Src,
+			DstRoot: cfg.Dst,
+			Filter:  cfg.Filter,
+			DryRun:  cfg.DryRun,
+			Events:  cfg.Events,
+		}
+		if _, err := DeleteExtraneous(ctx, delCfg); err != nil && copyErr == nil {
+			copyErr = err
+		}
 	}
 
 	return Result{

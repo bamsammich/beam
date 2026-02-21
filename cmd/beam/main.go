@@ -7,17 +7,39 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sync"
 	"syscall"
 
 	"github.com/bamsammich/beam/internal/engine"
+	"github.com/bamsammich/beam/internal/event"
+	"github.com/bamsammich/beam/internal/filter"
 	"github.com/bamsammich/beam/internal/stats"
+	"github.com/bamsammich/beam/internal/ui"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 var version = "dev"
 
 func main() {
 	os.Exit(run())
+}
+
+// filterFlag is a custom pflag.Value that preserves CLI ordering of
+// --exclude and --include rules by appending to a shared filter.Chain.
+type filterFlag struct {
+	chain   *filter.Chain
+	include bool
+}
+
+func (f *filterFlag) String() string { return "" }
+func (f *filterFlag) Type() string   { return "string" }
+
+func (f *filterFlag) Set(val string) error {
+	if f.include {
+		return f.chain.AddInclude(val)
+	}
+	return f.chain.AddExclude(val)
 }
 
 func run() int {
@@ -31,7 +53,16 @@ func run() int {
 		dryRun         bool
 		useIOURing     bool
 		showVersion    bool
+		forceFeed      bool
+		forceRate      bool
+		noProgress     bool
+		deleteFlag     bool
+		filterFile     string
+		minSizeStr     string
+		maxSizeStr     string
 	)
+
+	chain := filter.NewChain()
 
 	rootCmd := &cobra.Command{
 		Use:   "beam <source> <destination>",
@@ -74,9 +105,62 @@ func run() int {
 				workers = min(runtime.NumCPU()*2, 32)
 			}
 
+			// Load filter file if specified.
+			if filterFile != "" {
+				if err := chain.LoadFile(filterFile); err != nil {
+					return fmt.Errorf("load filter file: %w", err)
+				}
+			}
+
+			// Parse size filters.
+			if minSizeStr != "" {
+				n, err := filter.ParseSize(minSizeStr)
+				if err != nil {
+					return fmt.Errorf("invalid --min-size: %w", err)
+				}
+				chain.SetMinSize(n)
+			}
+			if maxSizeStr != "" {
+				n, err := filter.ParseSize(maxSizeStr)
+				if err != nil {
+					return fmt.Errorf("invalid --max-size: %w", err)
+				}
+				chain.SetMaxSize(n)
+			}
+
 			// Set up context with signal handling.
 			ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 			defer stop()
+
+			// Create stats collector.
+			collector := stats.NewCollector()
+
+			// Create events channel.
+			events := make(chan event.Event, 256)
+
+			// Create presenter.
+			isTTY := ui.IsTTY(os.Stderr.Fd())
+			presenter := ui.NewPresenter(ui.Config{
+				Writer:     os.Stdout,
+				ErrWriter:  os.Stderr,
+				IsTTY:      isTTY,
+				Quiet:      quiet,
+				Verbose:    verbose,
+				ForceFeed:  forceFeed,
+				ForceRate:  forceRate,
+				NoProgress: noProgress,
+				Stats:      collector,
+				Workers:    workers,
+				DstRoot:    dst,
+			})
+
+			// Start presenter goroutine.
+			var presenterWg sync.WaitGroup
+			presenterWg.Add(1)
+			go func() {
+				defer presenterWg.Done()
+				_ = presenter.Run(events)
+			}()
 
 			cfg := engine.Config{
 				Src:            src,
@@ -89,6 +173,14 @@ func run() int {
 				Verbose:        verbose,
 				Quiet:          quiet,
 				UseIOURing:     useIOURing,
+				Events:         events,
+				Stats:          collector,
+				Delete:         deleteFlag,
+			}
+
+			// Only set filter if it has rules/size constraints.
+			if !chain.Empty() {
+				cfg.Filter = chain
 			}
 
 			slog.Debug("starting copy",
@@ -102,8 +194,15 @@ func run() int {
 
 			result := engine.Run(ctx, cfg)
 
+			// Close events channel so presenter finishes.
+			close(events)
+			presenterWg.Wait()
+
 			if !quiet {
-				printSummary(result.Stats)
+				summary := presenter.Summary()
+				if summary != "" {
+					fmt.Fprintln(os.Stderr, summary)
+				}
 			}
 
 			if result.Err != nil {
@@ -129,6 +228,26 @@ func run() int {
 	rootCmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "suppress all output except errors")
 	rootCmd.Flags().BoolVar(&dryRun, "dry-run", false, "show what would be copied without writing")
 	rootCmd.Flags().BoolVar(&useIOURing, "iouring", false, "use io_uring for file copy (Linux only)")
+	rootCmd.Flags().BoolVar(&forceFeed, "feed", false, "force feed mode (one line per file)")
+	rootCmd.Flags().BoolVar(&forceRate, "rate", false, "force rate mode (sparkline + throughput)")
+	rootCmd.Flags().BoolVar(&noProgress, "no-progress", false, "disable progress display")
+
+	// Filter flags — use custom pflag.Value to preserve CLI ordering.
+	rootCmd.Flags().VarP(&filterFlag{chain: chain, include: false}, "exclude", "", "exclude files matching PATTERN (repeatable)")
+	rootCmd.Flags().VarP(&filterFlag{chain: chain, include: true}, "include", "", "include files matching PATTERN (repeatable)")
+	rootCmd.Flags().StringVar(&filterFile, "filter", "", "read filter rules from FILE")
+	rootCmd.Flags().BoolVar(&deleteFlag, "delete", false, "delete extraneous files from destination")
+	rootCmd.Flags().StringVar(&minSizeStr, "min-size", "", "skip files smaller than SIZE (e.g. 1M, 100K)")
+	rootCmd.Flags().StringVar(&maxSizeStr, "max-size", "", "skip files larger than SIZE (e.g. 1G, 500M)")
+
+	// Mark --exclude and --include as allowing repeated use.
+	rootCmd.Flags().SetAnnotation("exclude", "cobra_annotation_one_required", nil)
+	rootCmd.Flags().SetAnnotation("include", "cobra_annotation_one_required", nil)
+	rootCmd.Flags().VisitAll(func(f *pflag.Flag) {
+		if f.Name == "exclude" || f.Name == "include" {
+			f.NoOptDefVal = ""
+		}
+	})
 
 	if err := rootCmd.Execute(); err != nil {
 		if exitErr, ok := err.(*exitError); ok {
@@ -139,18 +258,6 @@ func run() int {
 	}
 
 	return 0
-}
-
-func printSummary(s stats.Snapshot) {
-	fmt.Fprintf(os.Stderr, "copied %d files (%s), %d dirs, %d hardlinks",
-		s.FilesCopied, stats.FormatBytes(s.BytesCopied), s.DirsCreated, s.HardlinksCreated)
-	if s.FilesFailed > 0 {
-		fmt.Fprintf(os.Stderr, ", %d failed", s.FilesFailed)
-	}
-	if s.FilesSkipped > 0 {
-		fmt.Fprintf(os.Stderr, ", %d skipped", s.FilesSkipped)
-	}
-	fmt.Fprintln(os.Stderr)
 }
 
 type exitError struct {

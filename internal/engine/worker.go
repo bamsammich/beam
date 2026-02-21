@@ -7,7 +7,9 @@ import (
 	"path/filepath"
 	"sync"
 	"syscall"
+	"time"
 
+	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/platform"
 	"github.com/bamsammich/beam/internal/stats"
 	"github.com/google/uuid"
@@ -24,6 +26,7 @@ type WorkerConfig struct {
 	DryRun        bool
 	UseIOURing    bool
 	Stats         *stats.Collector
+	Events        chan<- event.Event
 }
 
 // WorkerPool manages a pool of copy workers.
@@ -51,7 +54,7 @@ func NewWorkerPool(cfg WorkerConfig) (*WorkerPool, error) {
 // processed or the context is cancelled. Errors are sent to errs.
 func (wp *WorkerPool) Run(ctx context.Context, tasks <-chan FileTask, errs chan<- error) {
 	var wg sync.WaitGroup
-	for range wp.cfg.NumWorkers {
+	for i := range wp.cfg.NumWorkers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -61,7 +64,7 @@ func (wp *WorkerPool) Run(ctx context.Context, tasks <-chan FileTask, errs chan<
 					return
 				default:
 				}
-				if err := wp.processTask(ctx, task); err != nil {
+				if err := wp.processTask(ctx, task, i); err != nil {
 					select {
 					case errs <- err:
 					default:
@@ -73,6 +76,17 @@ func (wp *WorkerPool) Run(ctx context.Context, tasks <-chan FileTask, errs chan<
 	wg.Wait()
 }
 
+func (wp *WorkerPool) emit(e event.Event) {
+	if wp.cfg.Events == nil {
+		return
+	}
+	e.Timestamp = time.Now()
+	select {
+	case wp.cfg.Events <- e:
+	default:
+	}
+}
+
 // Close cleans up resources.
 func (wp *WorkerPool) Close() {
 	CleanupTmpFiles()
@@ -81,27 +95,28 @@ func (wp *WorkerPool) Close() {
 	}
 }
 
-func (wp *WorkerPool) processTask(ctx context.Context, task FileTask) error {
+func (wp *WorkerPool) processTask(ctx context.Context, task FileTask, workerID int) error {
 	if wp.cfg.DryRun {
 		wp.cfg.Stats.AddFilesScanned(1)
+		wp.emit(event.Event{Type: event.FileSkipped, Path: task.DstPath, Size: task.Size, WorkerID: workerID})
 		return nil
 	}
 
 	switch task.Type {
 	case Dir:
-		return wp.createDirectory(task)
+		return wp.createDirectory(task, workerID)
 	case Symlink:
 		return wp.createSymlink(task)
 	case Hardlink:
-		return wp.createHardlink(task)
+		return wp.createHardlink(task, workerID)
 	case Regular:
-		return wp.copyRegularFile(ctx, task)
+		return wp.copyRegularFile(ctx, task, workerID)
 	default:
 		return fmt.Errorf("unknown task type %d for %s", task.Type, task.SrcPath)
 	}
 }
 
-func (wp *WorkerPool) createDirectory(task FileTask) error {
+func (wp *WorkerPool) createDirectory(task FileTask, workerID int) error {
 	err := os.MkdirAll(task.DstPath, os.FileMode(task.Mode).Perm())
 	if err != nil {
 		return fmt.Errorf("mkdir %s: %w", task.DstPath, err)
@@ -114,6 +129,7 @@ func (wp *WorkerPool) createDirectory(task FileTask) error {
 	}
 
 	wp.cfg.Stats.AddDirsCreated(1)
+	wp.emit(event.Event{Type: event.DirCreated, Path: task.DstPath, WorkerID: workerID})
 	return nil
 }
 
@@ -131,7 +147,7 @@ func (wp *WorkerPool) createSymlink(task FileTask) error {
 	return nil
 }
 
-func (wp *WorkerPool) createHardlink(task FileTask) error {
+func (wp *WorkerPool) createHardlink(task FileTask, workerID int) error {
 	// Translate the source link target to the destination path.
 	// task.LinkTarget is the source path of the first copy; we need
 	// the corresponding destination path.
@@ -151,11 +167,13 @@ func (wp *WorkerPool) createHardlink(task FileTask) error {
 	}
 
 	wp.cfg.Stats.AddHardlinksCreated(1)
+	wp.emit(event.Event{Type: event.HardlinkCreated, Path: task.DstPath, WorkerID: workerID})
 	return nil
 }
 
-func (wp *WorkerPool) copyRegularFile(ctx context.Context, task FileTask) error {
+func (wp *WorkerPool) copyRegularFile(ctx context.Context, task FileTask, workerID int) error {
 	wp.cfg.Stats.AddFilesScanned(1)
+	wp.emit(event.Event{Type: event.FileStarted, Path: task.DstPath, Size: task.Size, WorkerID: workerID})
 
 	dir := filepath.Dir(task.DstPath)
 	base := filepath.Base(task.DstPath)
@@ -165,6 +183,7 @@ func (wp *WorkerPool) copyRegularFile(ctx context.Context, task FileTask) error 
 	// Ensure parent directory exists (may race with dir task workers).
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		wp.cfg.Stats.AddFilesFailed(1)
+		wp.emit(event.Event{Type: event.FileFailed, Path: task.DstPath, Size: task.Size, Error: err, WorkerID: workerID})
 		return fmt.Errorf("create parent dir %s: %w", dir, err)
 	}
 
@@ -178,6 +197,7 @@ func (wp *WorkerPool) copyRegularFile(ctx context.Context, task FileTask) error 
 	tmpFd, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, os.FileMode(task.Mode).Perm())
 	if err != nil {
 		wp.cfg.Stats.AddFilesFailed(1)
+		wp.emit(event.Event{Type: event.FileFailed, Path: task.DstPath, Size: task.Size, Error: err, WorkerID: workerID})
 		return fmt.Errorf("create tmp %s: %w", tmpPath, err)
 	}
 
@@ -188,6 +208,7 @@ func (wp *WorkerPool) copyRegularFile(ctx context.Context, task FileTask) error 
 		if err != nil {
 			tmpFd.Close()
 			wp.cfg.Stats.AddFilesFailed(1)
+			wp.emit(event.Event{Type: event.FileFailed, Path: task.DstPath, Size: task.Size, Error: err, WorkerID: workerID})
 			return fmt.Errorf("copy data %s: %w", task.SrcPath, err)
 		}
 	}
@@ -196,22 +217,26 @@ func (wp *WorkerPool) copyRegularFile(ctx context.Context, task FileTask) error 
 	if err := wp.setFileMetadata(task, tmpFd); err != nil {
 		tmpFd.Close()
 		wp.cfg.Stats.AddFilesFailed(1)
+		wp.emit(event.Event{Type: event.FileFailed, Path: task.DstPath, Size: task.Size, Error: err, WorkerID: workerID})
 		return fmt.Errorf("set metadata %s: %w", task.DstPath, err)
 	}
 
 	if err := tmpFd.Close(); err != nil {
 		wp.cfg.Stats.AddFilesFailed(1)
+		wp.emit(event.Event{Type: event.FileFailed, Path: task.DstPath, Size: task.Size, Error: err, WorkerID: workerID})
 		return fmt.Errorf("close tmp %s: %w", tmpPath, err)
 	}
 
 	// Atomic rename.
 	if err := os.Rename(tmpPath, task.DstPath); err != nil {
 		wp.cfg.Stats.AddFilesFailed(1)
+		wp.emit(event.Event{Type: event.FileFailed, Path: task.DstPath, Size: task.Size, Error: err, WorkerID: workerID})
 		return fmt.Errorf("rename %s -> %s: %w", tmpPath, task.DstPath, err)
 	}
 
 	wp.cfg.Stats.AddFilesCopied(1)
 	wp.cfg.Stats.AddBytesCopied(totalBytes)
+	wp.emit(event.Event{Type: event.FileCompleted, Path: task.DstPath, Size: totalBytes, WorkerID: workerID})
 	return nil
 }
 

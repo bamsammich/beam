@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/bamsammich/beam/internal/filter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -393,4 +394,131 @@ func TestScanner_PermissionDenied(t *testing.T) {
 
 	// Should get an error for the forbidden directory.
 	assert.Greater(t, len(errList), 0)
+}
+
+func TestScanner_ExcludeFilter(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "keep.txt"), []byte("keep"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "skip.log"), []byte("skip"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "also.log"), []byte("skip"), 0644))
+
+	chain := filter.NewChain()
+	require.NoError(t, chain.AddExclude("*.log"))
+
+	cfg := ScannerConfig{
+		SrcRoot: src,
+		DstRoot: dst,
+		Workers: 1,
+		Filter:  chain,
+	}
+
+	scanner := NewScanner(cfg)
+	tasks, errs := scanner.Scan(context.Background())
+
+	var taskList []FileTask
+	done := make(chan struct{})
+	go func() {
+		for task := range tasks {
+			taskList = append(taskList, task)
+		}
+		close(done)
+	}()
+	for range errs {
+	}
+	<-done
+
+	// Only keep.txt should be emitted.
+	assert.Len(t, taskList, 1)
+	assert.Contains(t, taskList[0].SrcPath, "keep.txt")
+}
+
+func TestScanner_DirExcludeSkipsRecursion(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(src, "build", "out"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "root.txt"), []byte("root"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "build", "artifact.bin"), []byte("bin"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "build", "out", "deep.txt"), []byte("deep"), 0644))
+
+	chain := filter.NewChain()
+	require.NoError(t, chain.AddExclude("build/"))
+
+	cfg := ScannerConfig{
+		SrcRoot: src,
+		DstRoot: dst,
+		Workers: 1,
+		Filter:  chain,
+	}
+
+	scanner := NewScanner(cfg)
+	tasks, errs := scanner.Scan(context.Background())
+
+	var taskList []FileTask
+	done := make(chan struct{})
+	go func() {
+		for task := range tasks {
+			taskList = append(taskList, task)
+		}
+		close(done)
+	}()
+	for range errs {
+	}
+	<-done
+
+	// Only root.txt should be emitted — build/ dir and its contents should be skipped.
+	assert.Len(t, taskList, 1)
+	assert.Contains(t, taskList[0].SrcPath, "root.txt")
+}
+
+func TestScanner_IncludeOverride(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "important.log"), []byte("keep"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "debug.log"), []byte("skip"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "app.txt"), []byte("keep"), 0644))
+
+	chain := filter.NewChain()
+	require.NoError(t, chain.AddInclude("important.log"))
+	require.NoError(t, chain.AddExclude("*.log"))
+
+	cfg := ScannerConfig{
+		SrcRoot: src,
+		DstRoot: dst,
+		Workers: 1,
+		Filter:  chain,
+	}
+
+	scanner := NewScanner(cfg)
+	tasks, errs := scanner.Scan(context.Background())
+
+	var taskList []FileTask
+	done := make(chan struct{})
+	go func() {
+		for task := range tasks {
+			taskList = append(taskList, task)
+		}
+		close(done)
+	}()
+	for range errs {
+	}
+	<-done
+
+	// important.log and app.txt should be emitted, debug.log should be skipped.
+	assert.Len(t, taskList, 2)
+	names := make(map[string]bool)
+	for _, task := range taskList {
+		names[filepath.Base(task.SrcPath)] = true
+	}
+	assert.True(t, names["important.log"])
+	assert.True(t, names["app.txt"])
+	assert.False(t, names["debug.log"])
 }

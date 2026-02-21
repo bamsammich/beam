@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/bamsammich/beam/internal/event"
+	"github.com/bamsammich/beam/internal/filter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zeebo/blake3"
@@ -177,4 +179,117 @@ func TestEngine_SourceNotExist(t *testing.T) {
 		Workers: 1,
 	})
 	assert.Error(t, result.Err)
+}
+
+func TestEngine_EventSequence(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+
+	require.NoError(t, os.MkdirAll(filepath.Join(src, "sub"), 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "file.txt"), []byte("data"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "sub", "nested.txt"), []byte("nested"), 0644))
+
+	events := make(chan event.Event, 256)
+
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		for ev := range events {
+			collected = append(collected, ev)
+		}
+		close(done)
+	}()
+
+	result := Run(context.Background(), Config{
+		Src:       src,
+		Dst:       dst,
+		Recursive: true,
+		Workers:   2,
+		Events:    events,
+	})
+
+	close(events)
+	<-done
+
+	require.NoError(t, result.Err)
+
+	// Should have ScanComplete, ScanStarted, FileStarted, FileCompleted, DirCreated events.
+	typeSet := make(map[event.Type]bool)
+	for _, ev := range collected {
+		typeSet[ev.Type] = true
+	}
+
+	assert.True(t, typeSet[event.ScanComplete], "expected ScanComplete event")
+	assert.True(t, typeSet[event.ScanStarted], "expected ScanStarted event")
+	assert.True(t, typeSet[event.FileStarted], "expected FileStarted event")
+	assert.True(t, typeSet[event.FileCompleted], "expected FileCompleted event")
+	assert.True(t, typeSet[event.DirCreated], "expected DirCreated event")
+
+	// Prescan emits ScanComplete first (with totals), then scanner emits ScanStarted.
+	assert.Equal(t, event.ScanComplete, collected[0].Type)
+}
+
+func TestEngine_WithFilter(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "keep.txt"), []byte("keep"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "skip.log"), []byte("skip"), 0644))
+
+	chain := filter.NewChain()
+	require.NoError(t, chain.AddExclude("*.log"))
+
+	result := Run(context.Background(), Config{
+		Src:       src,
+		Dst:       dst,
+		Recursive: true,
+		Workers:   2,
+		Filter:    chain,
+	})
+
+	require.NoError(t, result.Err)
+
+	// keep.txt should exist.
+	_, err := os.Stat(filepath.Join(dst, "keep.txt"))
+	assert.NoError(t, err)
+
+	// skip.log should NOT exist.
+	_, err = os.Stat(filepath.Join(dst, "skip.log"))
+	assert.True(t, os.IsNotExist(err))
+}
+
+func TestEngine_DeleteExtraneous(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+
+	require.NoError(t, os.Mkdir(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "keep.txt"), []byte("keep"), 0644))
+
+	// Pre-populate destination with extra file.
+	require.NoError(t, os.MkdirAll(dst, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dst, "keep.txt"), []byte("old"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(dst, "extra.txt"), []byte("extra"), 0644))
+
+	result := Run(context.Background(), Config{
+		Src:       src,
+		Dst:       dst,
+		Recursive: true,
+		Workers:   2,
+		Delete:    true,
+	})
+
+	require.NoError(t, result.Err)
+
+	// keep.txt should have been overwritten.
+	data, err := os.ReadFile(filepath.Join(dst, "keep.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, []byte("keep"), data)
+
+	// extra.txt should be deleted.
+	_, err = os.Stat(filepath.Join(dst, "extra.txt"))
+	assert.True(t, os.IsNotExist(err))
 }

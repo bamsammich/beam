@@ -7,8 +7,13 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
+
+	"github.com/bamsammich/beam/internal/event"
+	"github.com/bamsammich/beam/internal/filter"
+	"github.com/bamsammich/beam/internal/stats"
 )
 
 // ScannerConfig controls scanner behavior.
@@ -20,14 +25,19 @@ type ScannerConfig struct {
 	FollowSymlinks bool
 	IncludeXattrs  bool
 	SparseDetect   bool
+	Events         chan<- event.Event
+	Filter         *filter.Chain
+	Stats          *stats.Collector // if set, totals are written directly (avoids event-drop)
 }
 
 // Scanner traverses a directory tree in parallel and emits FileTask items.
 type Scanner struct {
-	cfg       ScannerConfig
-	tasks     chan FileTask
-	errs      chan error
-	inodeSeen sync.Map // DevIno -> string (first path seen)
+	cfg        ScannerConfig
+	tasks      chan FileTask
+	errs       chan error
+	inodeSeen  sync.Map // DevIno -> string (first path seen)
+	totalFiles atomic.Int64
+	totalBytes atomic.Int64
 }
 
 // NewScanner creates a scanner with the given config.
@@ -55,6 +65,8 @@ func (s *Scanner) Scan(ctx context.Context) (<-chan FileTask, <-chan error) {
 }
 
 func (s *Scanner) scanTree(ctx context.Context) {
+	s.emit(event.Event{Type: event.ScanStarted})
+
 	workQueue := make(chan string, s.cfg.Workers*2)
 	var outstanding sync.WaitGroup // tracks directories queued but not yet processed
 
@@ -80,6 +92,12 @@ func (s *Scanner) scanTree(ctx context.Context) {
 	outstanding.Wait()
 	close(workQueue)
 	workerWg.Wait()
+
+	s.emit(event.Event{
+		Type:      event.ScanComplete,
+		Total:     s.totalFiles.Load(),
+		TotalSize: s.totalBytes.Load(),
+	})
 }
 
 func (s *Scanner) scanDir(ctx context.Context, srcPath string, workQueue chan<- string, outstanding *sync.WaitGroup) {
@@ -144,6 +162,15 @@ func (s *Scanner) processEntry(ctx context.Context, srcPath, dstPath string, wor
 	stat := info.Sys().(*syscall.Stat_t)
 	mode := info.Mode()
 
+	// Apply filter if configured.
+	if s.cfg.Filter != nil {
+		relPath, _ := filepath.Rel(s.cfg.SrcRoot, srcPath)
+		if !s.cfg.Filter.Match(relPath, mode.IsDir(), info.Size()) {
+			s.emit(event.Event{Type: event.FileSkipped, Path: relPath, Size: info.Size()})
+			return nil
+		}
+	}
+
 	switch {
 	case mode.IsDir():
 		outstanding.Add(1)
@@ -206,6 +233,8 @@ func (s *Scanner) processEntry(ctx context.Context, srcPath, dstPath string, wor
 			chunks = splitIntoChunks(info.Size(), s.cfg.ChunkThreshold)
 		}
 
+		s.totalFiles.Add(1)
+		s.totalBytes.Add(info.Size())
 		s.sendTask(FileTask{
 			SrcPath:  srcPath,
 			DstPath:  dstPath,
@@ -236,6 +265,101 @@ func (s *Scanner) sendErr(err error) {
 	case s.errs <- err:
 	default:
 	}
+}
+
+func (s *Scanner) emit(e event.Event) {
+	if s.cfg.Events == nil {
+		return
+	}
+	e.Timestamp = time.Now()
+	select {
+	case s.cfg.Events <- e:
+	default:
+	}
+}
+
+// Prescan walks the source tree counting files and bytes without building tasks.
+// It's much faster than a full scan (just readdir+lstat, no file opens or sparse
+// detection) and provides accurate totals for the progress display.
+func Prescan(ctx context.Context, root string, f *filter.Chain) (files int64, bytes int64) {
+	type result struct {
+		files int64
+		bytes int64
+	}
+
+	workers := min(runtime.NumCPU(), 8)
+	workQueue := make(chan string, workers*4)
+	results := make(chan result, workers*4)
+	var outstanding sync.WaitGroup
+
+	// Prescan workers.
+	var wg sync.WaitGroup
+	for range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for dir := range workQueue {
+				entries, err := os.ReadDir(dir)
+				if err != nil {
+					outstanding.Done()
+					continue
+				}
+				var localFiles, localBytes int64
+				for _, e := range entries {
+					select {
+					case <-ctx.Done():
+						outstanding.Done()
+						return
+					default:
+					}
+					path := filepath.Join(dir, e.Name())
+					info, err := os.Lstat(path)
+					if err != nil {
+						continue
+					}
+					mode := info.Mode()
+
+					// Apply filter.
+					if f != nil {
+						relPath, _ := filepath.Rel(root, path)
+						if !f.Match(relPath, mode.IsDir(), info.Size()) {
+							continue
+						}
+					}
+
+					if mode.IsDir() {
+						outstanding.Add(1)
+						workQueue <- path
+					} else if mode.IsRegular() {
+						localFiles++
+						localBytes += info.Size()
+					}
+				}
+				if localFiles > 0 {
+					results <- result{localFiles, localBytes}
+				}
+				outstanding.Done()
+			}
+		}()
+	}
+
+	// Seed root.
+	outstanding.Add(1)
+	workQueue <- root
+
+	// Close work queue when all dirs processed, then close results.
+	go func() {
+		outstanding.Wait()
+		close(workQueue)
+		wg.Wait()
+		close(results)
+	}()
+
+	for r := range results {
+		files += r.files
+		bytes += r.bytes
+	}
+	return files, bytes
 }
 
 func splitIntoChunks(fileSize, chunkSize int64) []Chunk {
