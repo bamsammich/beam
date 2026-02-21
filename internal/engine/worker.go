@@ -27,6 +27,8 @@ type WorkerConfig struct {
 	UseIOURing    bool
 	Stats         *stats.Collector
 	Events        chan<- event.Event
+	Checkpoint    *CheckpointDB
+	DstRoot       string // destination root for computing relative paths
 }
 
 // WorkerPool manages a pool of copy workers.
@@ -237,6 +239,16 @@ func (wp *WorkerPool) copyRegularFile(ctx context.Context, task FileTask, worker
 	wp.cfg.Stats.AddFilesCopied(1)
 	wp.cfg.Stats.AddBytesCopied(totalBytes)
 	wp.emit(event.Event{Type: event.FileCompleted, Path: task.DstPath, Size: totalBytes, WorkerID: workerID})
+
+	// Record in checkpoint for resume support.
+	if wp.cfg.Checkpoint != nil {
+		relPath, _ := filepath.Rel(wp.cfg.DstRoot, task.DstPath)
+		hash, err := HashFile(task.DstPath)
+		if err == nil {
+			_ = wp.cfg.Checkpoint.MarkCompleted(relPath, task.Size, hash, task.ModTime.UnixNano())
+		}
+	}
+
 	return nil
 }
 

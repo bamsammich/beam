@@ -84,6 +84,38 @@ func TestPlainPresenterDeleteFile(t *testing.T) {
 	assert.Contains(t, out.String(), "delete: extra.txt")
 }
 
+func TestPlainPresenterVerifyStarted(t *testing.T) {
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	collector := stats.NewCollector()
+
+	p := &plainPresenter{w: &out, errW: &errOut, stats: collector}
+
+	events := make(chan Event, 5)
+	events <- Event{Type: event.VerifyStarted}
+	close(events)
+
+	err := p.Run(events)
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "verifying...")
+}
+
+func TestPlainPresenterVerifyFailed(t *testing.T) {
+	var out bytes.Buffer
+	var errOut bytes.Buffer
+	collector := stats.NewCollector()
+
+	p := &plainPresenter{w: &out, errW: &errOut, stats: collector}
+
+	events := make(chan Event, 5)
+	events <- Event{Type: event.VerifyFailed, Path: "bad/file.txt"}
+	close(events)
+
+	err := p.Run(events)
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "MISMATCH: bad/file.txt")
+}
+
 func TestPlainPresenterSummary(t *testing.T) {
 	collector := stats.NewCollector()
 	collector.AddFilesCopied(100)

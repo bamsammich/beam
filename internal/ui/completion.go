@@ -19,12 +19,19 @@ func completionSummary(snap stats.Snapshot) string {
 		icon = "\u2717"
 	}
 
-	return fmt.Sprintf("done %s  files %s  size %s  avg %s  time %s  errors %d",
+	base := fmt.Sprintf("done %s  files %s  size %s  avg %s  time %s",
 		icon,
 		FormatCount(snap.FilesCopied),
 		FormatBytes(snap.BytesCopied),
 		FormatRate(avgSpeed),
 		FormatDuration(snap.Elapsed),
-		snap.FilesFailed,
 	)
+
+	if snap.FilesVerified > 0 || snap.FilesVerifyFailed > 0 {
+		base += fmt.Sprintf("  verified %s", FormatCount(snap.FilesVerified))
+	}
+
+	base += fmt.Sprintf("  errors %d", snap.FilesFailed+snap.FilesVerifyFailed)
+
+	return base
 }

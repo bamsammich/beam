@@ -52,6 +52,12 @@ func (p *plainPresenter) handleEvent(ev Event) {
 		fmt.Fprintf(p.w, "%s  skipped\n", path)
 	case DeleteFile:
 		fmt.Fprintf(p.w, "delete: %s\n", path)
+	case VerifyStarted:
+		fmt.Fprintln(p.w, "verifying...")
+	case VerifyFailed:
+		fmt.Fprintf(p.w, "MISMATCH: %s\n", path)
+	case VerifyOK:
+		// silent in plain mode
 	}
 }
 

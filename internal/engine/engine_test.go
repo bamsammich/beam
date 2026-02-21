@@ -293,3 +293,87 @@ func TestEngine_DeleteExtraneous(t *testing.T) {
 	_, err = os.Stat(filepath.Join(dst, "extra.txt"))
 	assert.True(t, os.IsNotExist(err))
 }
+
+func TestEngine_Resume(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+
+	require.NoError(t, os.MkdirAll(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "a.txt"), []byte("aaa"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "b.txt"), []byte("bbb"), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "c.txt"), []byte("ccc"), 0644))
+
+	// First run: copy with Verify=true to keep checkpoint DB on disk.
+	result1 := Run(context.Background(), Config{
+		Src:       src,
+		Dst:       dst,
+		Recursive: true,
+		Workers:   2,
+		Verify:    true,
+	})
+	require.NoError(t, result1.Err)
+	assert.Equal(t, int64(3), result1.Stats.FilesCopied)
+
+	// Checkpoint DB should still exist (Verify=true prevents removal).
+	cp, err := OpenCheckpoint(src, dst)
+	require.NoError(t, err)
+	assert.True(t, cp.IsCompleted("a.txt", 3, getModTimeNano(t, filepath.Join(src, "a.txt"))))
+	cp.Close()
+
+	// Second run: should skip all files since they're already completed.
+	result2 := Run(context.Background(), Config{
+		Src:       src,
+		Dst:       dst,
+		Recursive: true,
+		Workers:   2,
+		Verify:    true,
+	})
+	require.NoError(t, result2.Err)
+
+	// All files should have been skipped (scanner skips completed files).
+	assert.Equal(t, int64(0), result2.Stats.FilesCopied)
+
+	// All destination files should still match source.
+	for _, name := range []string{"a.txt", "b.txt", "c.txt"} {
+		assert.Equal(t, hashFile(t, filepath.Join(src, name)), hashFile(t, filepath.Join(dst, name)))
+	}
+}
+
+func getModTimeNano(t *testing.T, path string) int64 {
+	t.Helper()
+	info, err := os.Lstat(path)
+	require.NoError(t, err)
+	return info.ModTime().UnixNano()
+}
+
+func TestEngine_NoResume(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+	t.Setenv("XDG_RUNTIME_DIR", filepath.Join(dir, "runtime"))
+
+	require.NoError(t, os.MkdirAll(src, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(src, "file.txt"), []byte("data"), 0644))
+
+	// First run.
+	result1 := Run(context.Background(), Config{
+		Src:       src,
+		Dst:       dst,
+		Recursive: true,
+		Workers:   1,
+	})
+	require.NoError(t, result1.Err)
+
+	// Second run with NoResume — should re-copy everything.
+	result2 := Run(context.Background(), Config{
+		Src:       src,
+		Dst:       dst,
+		Recursive: true,
+		Workers:   1,
+		NoResume:  true,
+	})
+	require.NoError(t, result2.Err)
+	assert.Equal(t, int64(1), result2.Stats.FilesCopied)
+}

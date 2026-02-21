@@ -22,6 +22,9 @@ func TestTypeString(t *testing.T) {
 		{DirCreated, "DirCreated"},
 		{HardlinkCreated, "HardlinkCreated"},
 		{DeleteFile, "DeleteFile"},
+		{VerifyStarted, "VerifyStarted"},
+		{VerifyOK, "VerifyOK"},
+		{VerifyFailed, "VerifyFailed"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {

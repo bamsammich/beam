@@ -107,6 +107,18 @@ func TestHudPresenterSummary(t *testing.T) {
 	assert.Contains(t, s, "files 500")
 }
 
+func TestHudPresenterSummaryWithVerify(t *testing.T) {
+	collector := stats.NewCollector()
+	collector.AddFilesCopied(100)
+	collector.AddBytesCopied(1024 * 1024)
+	collector.AddFilesVerified(100)
+
+	p := &hudPresenter{stats: collector, workers: 4}
+	s := p.Summary()
+	assert.Contains(t, s, "verified 100")
+	assert.Contains(t, s, "errors 0")
+}
+
 func TestTruncPath(t *testing.T) {
 	assert.Equal(t, "short.txt", truncPath("short.txt", 20))
 	assert.Equal(t, "...ry/long/path.txt", truncPath("a/very/long/directory/long/path.txt", 19))
@@ -217,6 +229,54 @@ func TestHudAlwaysRedrawsAfterFeedLine(t *testing.T) {
 	assert.Contains(t, output, "b.txt")
 	// The progress bar character should appear (HUD was drawn).
 	assert.Contains(t, output, "□")
+}
+
+func TestHudPresenterVerifyStarted(t *testing.T) {
+	var out bytes.Buffer
+	collector := stats.NewCollector()
+	collector.SetTotals(10, 10240)
+
+	p := &hudPresenter{
+		w:           &out,
+		stats:       collector,
+		forceFeed:   true,
+		workers:     4,
+		busyWorkers: make(map[int]bool),
+	}
+
+	events := make(chan Event, 10)
+	events <- Event{Type: event.VerifyStarted}
+	close(events)
+
+	err := p.Run(events)
+	assert.NoError(t, err)
+	assert.Contains(t, out.String(), "verifying checksums...")
+}
+
+func TestHudPresenterVerifyFailed(t *testing.T) {
+	var out bytes.Buffer
+	collector := stats.NewCollector()
+	collector.SetTotals(10, 10240)
+
+	p := &hudPresenter{
+		w:           &out,
+		stats:       collector,
+		forceFeed:   true,
+		workers:     4,
+		busyWorkers: make(map[int]bool),
+	}
+
+	events := make(chan Event, 10)
+	events <- Event{Type: event.VerifyFailed, Path: "bad/file.txt"}
+	close(events)
+
+	err := p.Run(events)
+	assert.NoError(t, err)
+
+	output := out.String()
+	assert.Contains(t, output, "\u2717")
+	assert.Contains(t, output, "file.txt")
+	assert.Contains(t, output, "CHECKSUM MISMATCH")
 }
 
 func TestHudRateSwitchNotice(t *testing.T) {
