@@ -44,3 +44,6 @@ devenv.local.yaml
 
 # Build output
 bin/
+
+# Git worktrees
+.worktrees/
