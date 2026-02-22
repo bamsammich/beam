@@ -11,6 +11,8 @@ import (
 
 	"github.com/bamsammich/beam/internal/engine"
 	"github.com/bamsammich/beam/internal/event"
+	"github.com/bamsammich/beam/internal/stats"
+	"github.com/bamsammich/beam/internal/transport"
 )
 
 func TestIntegration_LocalToLocal(t *testing.T) {
@@ -407,4 +409,70 @@ func TestIntegration_Hardlinks(t *testing.T) {
 	// Stats should reflect hardlink creation.
 	require.GreaterOrEqual(t, result.Stats.HardlinksCreated, int64(1),
 		"at least one hardlink should be reported")
+}
+
+func TestIntegration_Verify(t *testing.T) {
+	t.Parallel()
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	createTestTree(t, srcDir)
+
+	// Phase 1: Copy with verification — should pass.
+	evCh, getEvents := collectEvents(t)
+	result := engine.Run(context.Background(), engine.Config{
+		Sources:   []string{srcDir + "/"},
+		Dst:       dstDir,
+		Archive:   true,
+		Recursive: true,
+		Workers:   2,
+		Verify:    true,
+		Events:    evCh,
+	})
+
+	require.NoError(t, result.Err, "copy with verify should succeed")
+
+	// Check that VerifyOK events were emitted.
+	events := getEvents()
+	var verifyOKCount int
+	for _, ev := range events {
+		if ev.Type == event.VerifyOK {
+			verifyOKCount++
+		}
+	}
+	require.Positive(t, verifyOKCount, "should have emitted VerifyOK events")
+
+	// Phase 2: Corrupt a destination file and run Verify() directly.
+	corruptPath := filepath.Join(dstDir, "root.txt")
+	corruptData, err := os.ReadFile(corruptPath)
+	require.NoError(t, err)
+	corruptData[0] ^= 0xFF // flip bits in first byte
+	require.NoError(t, os.WriteFile(corruptPath, corruptData, 0o644))
+
+	srcEP := transport.NewLocalReadEndpoint(srcDir)
+	dstEP := transport.NewLocalWriteEndpoint(dstDir)
+	defer srcEP.Close()
+	defer dstEP.Close()
+
+	vr := engine.Verify(context.Background(), engine.VerifyConfig{
+		SrcRoot:     srcDir,
+		DstRoot:     dstDir,
+		Workers:     2,
+		SrcEndpoint: srcEP,
+		DstEndpoint: dstEP,
+		Stats:       stats.NewCollector(),
+	})
+
+	require.Positive(t, vr.Failed, "corrupted file should fail verification")
+
+	// Find the specific failure.
+	var foundCorrupt bool
+	for _, ve := range vr.Errors {
+		if ve.Path == "root.txt" {
+			foundCorrupt = true
+			break
+		}
+	}
+	require.True(t, foundCorrupt, "root.txt should appear in verification errors")
 }

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -243,10 +244,9 @@ func createSparseFile(t *testing.T, path string, dataSize, holeSize int64) int64
 
 // collectEvents creates a buffered event channel that records all events.
 // Returns the channel for engine.Config and a function to retrieve collected
-// events (safe to call only after the engine has finished and the channel is
-// closed via cleanup).
-//
-//nolint:unused // used by scenario integration tests added in subsequent commits
+// events. The getter closes the channel and waits for the drain goroutine,
+// so it is safe to read the slice. It may be called at most once. If the
+// getter is never called, t.Cleanup closes the channel on test exit.
 func collectEvents(t *testing.T) (chan<- event.Event, func() []event.Event) {
 	t.Helper()
 	ch := make(chan event.Event, 4096)
@@ -258,18 +258,19 @@ func collectEvents(t *testing.T) (chan<- event.Event, func() []event.Event) {
 			collected = append(collected, ev)
 		}
 	}()
-	t.Cleanup(func() {
-		close(ch)
+	var once sync.Once
+	drain := func() {
+		once.Do(func() { close(ch) })
 		<-done
-	})
+	}
+	t.Cleanup(drain)
 	return ch, func() []event.Event {
+		drain()
 		return collected
 	}
 }
 
 // findTmpFiles returns any .beam-tmp files found under root.
-//
-//nolint:unused // used by TestIntegration_InterruptAndResume added in a subsequent commit
 func findTmpFiles(t *testing.T, root string) []string {
 	t.Helper()
 	var found []string
@@ -288,8 +289,6 @@ func findTmpFiles(t *testing.T, root string) []string {
 
 // verifyExistingFilesMatch checks that every regular file in dstRoot that also
 // exists in srcRoot has identical content. Files only in dstRoot are ignored.
-//
-//nolint:unused // used by TestIntegration_InterruptAndResume added in a subsequent commit
 func verifyExistingFilesMatch(t *testing.T, srcRoot, dstRoot string) {
 	t.Helper()
 	err := filepath.WalkDir(dstRoot, func(path string, d os.DirEntry, err error) error {
