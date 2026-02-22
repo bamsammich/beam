@@ -20,7 +20,12 @@ const DefaultPort = 7223
 
 // DialBeam connects to a beam daemon, performs TLS handshake and protocol
 // handshake. Returns a running mux, the server root, and capabilities.
-func DialBeam(addr, token string, tlsConfig *tls.Config) (*proto.Mux, string, transport.Capabilities, error) {
+//
+//nolint:revive // cyclomatic: TLS dial + handshake + response parsing — irreducible
+func DialBeam(
+	addr, token string,
+	tlsConfig *tls.Config,
+) (*proto.Mux, string, transport.Capabilities, error) {
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", addr, tlsConfig)
 	if err != nil {
 		return nil, "", transport.Capabilities{}, fmt.Errorf("dial %s: %w", addr, err)
@@ -29,7 +34,7 @@ func DialBeam(addr, token string, tlsConfig *tls.Config) (*proto.Mux, string, tr
 	mux := proto.NewMux(conn)
 
 	// Start mux in background.
-	go mux.Run()
+	go mux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
 
 	// Open control stream for handshake.
 	controlCh := mux.OpenStream(proto.ControlStream)
@@ -61,28 +66,41 @@ func DialBeam(addr, token string, tlsConfig *tls.Config) (*proto.Mux, string, tr
 	case f, ok := <-controlCh:
 		if !ok {
 			mux.Close()
-			return nil, "", transport.Capabilities{}, errors.New("connection closed during handshake")
+			return nil, "", transport.Capabilities{}, errors.New(
+				"connection closed during handshake",
+			)
 		}
 		if f.MsgType == proto.MsgErrorResp {
 			var errResp proto.ErrorResp
 			errResp.UnmarshalMsg(f.Payload) //nolint:errcheck // best effort
 			mux.Close()
-			return nil, "", transport.Capabilities{}, fmt.Errorf("handshake rejected: %s", errResp.Message)
+			return nil, "", transport.Capabilities{}, fmt.Errorf(
+				"handshake rejected: %s",
+				errResp.Message,
+			)
 		}
 		if f.MsgType == 0 && len(f.Payload) == 0 {
 			// Zero-value frame from closed channel.
 			mux.Close()
-			return nil, "", transport.Capabilities{}, errors.New("connection closed during handshake (auth rejected)")
+			return nil, "", transport.Capabilities{}, errors.New(
+				"connection closed during handshake (auth rejected)",
+			)
 		}
 		if f.MsgType != proto.MsgHandshakeResp {
 			mux.Close()
-			return nil, "", transport.Capabilities{}, fmt.Errorf("unexpected message type 0x%02x during handshake", f.MsgType)
+			return nil, "", transport.Capabilities{}, fmt.Errorf(
+				"unexpected message type 0x%02x during handshake",
+				f.MsgType,
+			)
 		}
 
 		var resp proto.HandshakeResp
 		if _, err := resp.UnmarshalMsg(f.Payload); err != nil {
 			mux.Close()
-			return nil, "", transport.Capabilities{}, fmt.Errorf("decode handshake response: %w", err)
+			return nil, "", transport.Capabilities{}, fmt.Errorf(
+				"decode handshake response: %w",
+				err,
+			)
 		}
 
 		mux.CloseStream(proto.ControlStream)
@@ -113,7 +131,9 @@ func queryCaps(mux *proto.Mux) (transport.Capabilities, error) {
 		return transport.Capabilities{}, err
 	}
 
-	if err := mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgCapsReq, Payload: payload}); err != nil {
+	if err := mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgCapsReq, Payload: payload},
+	); err != nil {
 		return transport.Capabilities{}, err
 	}
 
@@ -135,13 +155,13 @@ func queryCaps(mux *proto.Mux) (transport.Capabilities, error) {
 func decodeError(payload []byte) error {
 	var errResp proto.ErrorResp
 	if _, err := errResp.UnmarshalMsg(payload); err != nil {
-		return fmt.Errorf("protocol error (could not decode)")
+		return errors.New("protocol error (could not decode)")
 	}
 	return errors.New(errResp.Message)
 }
 
-// BeamReadEndpoint implements transport.ReadEndpoint over the beam protocol.
-type BeamReadEndpoint struct {
+// ReadEndpoint implements transport.ReadEndpoint over the beam protocol.
+type ReadEndpoint struct {
 	mux        *proto.Mux
 	root       string
 	caps       transport.Capabilities
@@ -149,20 +169,24 @@ type BeamReadEndpoint struct {
 }
 
 // Compile-time interface check.
-var _ transport.ReadEndpoint = (*BeamReadEndpoint)(nil)
+var _ transport.ReadEndpoint = (*ReadEndpoint)(nil)
 
-// NewBeamReadEndpoint creates a read endpoint from an established mux connection.
-func NewBeamReadEndpoint(mux *proto.Mux, root string, caps transport.Capabilities) *BeamReadEndpoint {
-	ep := &BeamReadEndpoint{mux: mux, root: root, caps: caps}
+// NewReadEndpoint creates a read endpoint from an established mux connection.
+func NewReadEndpoint(
+	mux *proto.Mux,
+	root string,
+	caps transport.Capabilities,
+) *ReadEndpoint {
+	ep := &ReadEndpoint{mux: mux, root: root, caps: caps}
 	ep.nextStream.Store(2) // 1 was used for caps query
 	return ep
 }
 
-func (e *BeamReadEndpoint) allocStream() uint32 {
+func (e *ReadEndpoint) allocStream() uint32 {
 	return e.nextStream.Add(1)
 }
 
-func (e *BeamReadEndpoint) Walk(fn func(entry transport.FileEntry) error) error {
+func (e *ReadEndpoint) Walk(fn func(entry transport.FileEntry) error) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -172,7 +196,9 @@ func (e *BeamReadEndpoint) Walk(fn func(entry transport.FileEntry) error) error 
 	if err != nil {
 		return err
 	}
-	if err := e.mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgWalkReq, Payload: payload}); err != nil {
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgWalkReq, Payload: payload},
+	); err != nil {
 		return err
 	}
 
@@ -197,7 +223,7 @@ func (e *BeamReadEndpoint) Walk(fn func(entry transport.FileEntry) error) error 
 	return errors.New("stream closed during walk")
 }
 
-func (e *BeamReadEndpoint) Stat(relPath string) (transport.FileEntry, error) {
+func (e *ReadEndpoint) Stat(relPath string) (transport.FileEntry, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -207,7 +233,9 @@ func (e *BeamReadEndpoint) Stat(relPath string) (transport.FileEntry, error) {
 	if err != nil {
 		return transport.FileEntry{}, err
 	}
-	if err := e.mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgStatReq, Payload: payload}); err != nil {
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgStatReq, Payload: payload},
+	); err != nil {
 		return transport.FileEntry{}, err
 	}
 
@@ -226,7 +254,7 @@ func (e *BeamReadEndpoint) Stat(relPath string) (transport.FileEntry, error) {
 	return proto.ToFileEntry(resp.Entry), nil
 }
 
-func (e *BeamReadEndpoint) ReadDir(relPath string) ([]transport.FileEntry, error) {
+func (e *ReadEndpoint) ReadDir(relPath string) ([]transport.FileEntry, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -236,7 +264,9 @@ func (e *BeamReadEndpoint) ReadDir(relPath string) ([]transport.FileEntry, error
 	if err != nil {
 		return nil, err
 	}
-	if err := e.mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgReadDirReq, Payload: payload}); err != nil {
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgReadDirReq, Payload: payload},
+	); err != nil {
 		return nil, err
 	}
 
@@ -260,7 +290,7 @@ func (e *BeamReadEndpoint) ReadDir(relPath string) ([]transport.FileEntry, error
 	return entries, nil
 }
 
-func (e *BeamReadEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
+func (e *ReadEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 
@@ -270,7 +300,9 @@ func (e *BeamReadEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
 		e.mux.CloseStream(streamID)
 		return nil, err
 	}
-	if err := e.mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgOpenReadReq, Payload: payload}); err != nil {
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgOpenReadReq, Payload: payload},
+	); err != nil {
 		e.mux.CloseStream(streamID)
 		return nil, err
 	}
@@ -278,7 +310,7 @@ func (e *BeamReadEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
 	return &beamReader{mux: e.mux, streamID: streamID, ch: ch}, nil
 }
 
-func (e *BeamReadEndpoint) Hash(relPath string) (string, error) {
+func (e *ReadEndpoint) Hash(relPath string) (string, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -288,7 +320,9 @@ func (e *BeamReadEndpoint) Hash(relPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := e.mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgHashReq, Payload: payload}); err != nil {
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgHashReq, Payload: payload},
+	); err != nil {
 		return "", err
 	}
 
@@ -307,16 +341,85 @@ func (e *BeamReadEndpoint) Hash(relPath string) (string, error) {
 	return resp.Hash, nil
 }
 
-func (e *BeamReadEndpoint) Root() string                { return e.root }
-func (e *BeamReadEndpoint) Caps() transport.Capabilities { return e.caps }
-func (e *BeamReadEndpoint) Close() error                 { return e.mux.Close() }
+// ComputeSignature asks the remote daemon to compute block signatures of a file.
+func (e *ReadEndpoint) ComputeSignature(
+	relPath string,
+	fileSize int64,
+) (transport.Signature, error) {
+	streamID := e.allocStream()
+	ch := e.mux.OpenStream(streamID)
+	defer e.mux.CloseStream(streamID)
+
+	req := proto.ComputeSignatureReq{RelPath: relPath, FileSize: fileSize}
+	payload, err := req.MarshalMsg(nil)
+	if err != nil {
+		return transport.Signature{}, err
+	}
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgComputeSignatureReq, Payload: payload},
+	); err != nil {
+		return transport.Signature{}, err
+	}
+
+	f, ok := <-ch
+	if !ok {
+		return transport.Signature{}, errors.New("stream closed")
+	}
+	if f.MsgType == proto.MsgErrorResp {
+		return transport.Signature{}, decodeError(f.Payload)
+	}
+	var resp proto.ComputeSignatureResp
+	if _, err := resp.UnmarshalMsg(f.Payload); err != nil {
+		return transport.Signature{}, err
+	}
+	return proto.ToSignature(resp.BlockSize, resp.Signatures), nil
+}
+
+// MatchBlocks asks the remote daemon to match its file against provided signatures.
+func (e *ReadEndpoint) MatchBlocks(
+	relPath string,
+	sig transport.Signature,
+) ([]transport.DeltaOp, error) {
+	streamID := e.allocStream()
+	ch := e.mux.OpenStream(streamID)
+	defer e.mux.CloseStream(streamID)
+
+	blockSize, sigMsgs := proto.FromSignature(sig)
+	req := proto.MatchBlocksReq{RelPath: relPath, BlockSize: blockSize, Signatures: sigMsgs}
+	payload, err := req.MarshalMsg(nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgMatchBlocksReq, Payload: payload},
+	); err != nil {
+		return nil, err
+	}
+
+	f, ok := <-ch
+	if !ok {
+		return nil, errors.New("stream closed")
+	}
+	if f.MsgType == proto.MsgErrorResp {
+		return nil, decodeError(f.Payload)
+	}
+	var resp proto.MatchBlocksResp
+	if _, err := resp.UnmarshalMsg(f.Payload); err != nil {
+		return nil, err
+	}
+	return proto.ToDeltaOps(resp.Ops), nil
+}
+
+func (e *ReadEndpoint) Root() string                 { return e.root }
+func (e *ReadEndpoint) Caps() transport.Capabilities { return e.caps }
+func (e *ReadEndpoint) Close() error                 { return e.mux.Close() }
 
 // beamReader implements io.ReadCloser by reading streamed data from the protocol.
 type beamReader struct {
 	mux      *proto.Mux
-	streamID uint32
 	ch       <-chan proto.Frame
 	buf      []byte // unconsumed data from last ReadDataMsg
+	streamID uint32
 	done     bool
 }
 
@@ -359,8 +462,8 @@ func (r *beamReader) Close() error {
 	return nil
 }
 
-// BeamWriteEndpoint implements transport.WriteEndpoint over the beam protocol.
-type BeamWriteEndpoint struct {
+// WriteEndpoint implements transport.WriteEndpoint over the beam protocol.
+type WriteEndpoint struct {
 	mux        *proto.Mux
 	root       string
 	caps       transport.Capabilities
@@ -368,20 +471,24 @@ type BeamWriteEndpoint struct {
 }
 
 // Compile-time interface check.
-var _ transport.WriteEndpoint = (*BeamWriteEndpoint)(nil)
+var _ transport.WriteEndpoint = (*WriteEndpoint)(nil)
 
-// NewBeamWriteEndpoint creates a write endpoint from an established mux connection.
-func NewBeamWriteEndpoint(mux *proto.Mux, root string, caps transport.Capabilities) *BeamWriteEndpoint {
-	ep := &BeamWriteEndpoint{mux: mux, root: root, caps: caps}
+// NewWriteEndpoint creates a write endpoint from an established mux connection.
+func NewWriteEndpoint(
+	mux *proto.Mux,
+	root string,
+	caps transport.Capabilities,
+) *WriteEndpoint {
+	ep := &WriteEndpoint{mux: mux, root: root, caps: caps}
 	ep.nextStream.Store(2)
 	return ep
 }
 
-func (e *BeamWriteEndpoint) allocStream() uint32 {
+func (e *WriteEndpoint) allocStream() uint32 {
 	return e.nextStream.Add(1)
 }
 
-func (e *BeamWriteEndpoint) MkdirAll(relPath string, perm os.FileMode) error {
+func (e *WriteEndpoint) MkdirAll(relPath string, perm os.FileMode) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -391,14 +498,20 @@ func (e *BeamWriteEndpoint) MkdirAll(relPath string, perm os.FileMode) error {
 	if err != nil {
 		return err
 	}
-	if err := e.mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgMkdirAllReq, Payload: payload}); err != nil {
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgMkdirAllReq, Payload: payload},
+	); err != nil {
 		return err
 	}
 
 	return e.expectAck(ch)
 }
 
-func (e *BeamWriteEndpoint) CreateTemp(relPath string, perm os.FileMode) (transport.WriteFile, error) {
+//nolint:ireturn // implements WriteEndpoint interface
+func (e *WriteEndpoint) CreateTemp(
+	relPath string,
+	perm os.FileMode,
+) (transport.WriteFile, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 
@@ -408,7 +521,9 @@ func (e *BeamWriteEndpoint) CreateTemp(relPath string, perm os.FileMode) (transp
 		e.mux.CloseStream(streamID)
 		return nil, err
 	}
-	if err := e.mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgCreateTempReq, Payload: payload}); err != nil {
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgCreateTempReq, Payload: payload},
+	); err != nil {
 		e.mux.CloseStream(streamID)
 		return nil, err
 	}
@@ -440,7 +555,7 @@ func (e *BeamWriteEndpoint) CreateTemp(relPath string, perm os.FileMode) (transp
 	}, nil
 }
 
-func (e *BeamWriteEndpoint) Rename(oldRel, newRel string) error {
+func (e *WriteEndpoint) Rename(oldRel, newRel string) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -450,14 +565,16 @@ func (e *BeamWriteEndpoint) Rename(oldRel, newRel string) error {
 	if err != nil {
 		return err
 	}
-	if err := e.mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgRenameReq, Payload: payload}); err != nil {
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgRenameReq, Payload: payload},
+	); err != nil {
 		return err
 	}
 
 	return e.expectAck(ch)
 }
 
-func (e *BeamWriteEndpoint) Remove(relPath string) error {
+func (e *WriteEndpoint) Remove(relPath string) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -467,14 +584,16 @@ func (e *BeamWriteEndpoint) Remove(relPath string) error {
 	if err != nil {
 		return err
 	}
-	if err := e.mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgRemoveReq, Payload: payload}); err != nil {
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgRemoveReq, Payload: payload},
+	); err != nil {
 		return err
 	}
 
 	return e.expectAck(ch)
 }
 
-func (e *BeamWriteEndpoint) RemoveAll(relPath string) error {
+func (e *WriteEndpoint) RemoveAll(relPath string) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -484,14 +603,16 @@ func (e *BeamWriteEndpoint) RemoveAll(relPath string) error {
 	if err != nil {
 		return err
 	}
-	if err := e.mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgRemoveAllReq, Payload: payload}); err != nil {
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgRemoveAllReq, Payload: payload},
+	); err != nil {
 		return err
 	}
 
 	return e.expectAck(ch)
 }
 
-func (e *BeamWriteEndpoint) Symlink(target, newRel string) error {
+func (e *WriteEndpoint) Symlink(target, newRel string) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -501,14 +622,16 @@ func (e *BeamWriteEndpoint) Symlink(target, newRel string) error {
 	if err != nil {
 		return err
 	}
-	if err := e.mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgSymlinkReq, Payload: payload}); err != nil {
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgSymlinkReq, Payload: payload},
+	); err != nil {
 		return err
 	}
 
 	return e.expectAck(ch)
 }
 
-func (e *BeamWriteEndpoint) Link(oldRel, newRel string) error {
+func (e *WriteEndpoint) Link(oldRel, newRel string) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -518,14 +641,20 @@ func (e *BeamWriteEndpoint) Link(oldRel, newRel string) error {
 	if err != nil {
 		return err
 	}
-	if err := e.mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgLinkReq, Payload: payload}); err != nil {
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgLinkReq, Payload: payload},
+	); err != nil {
 		return err
 	}
 
 	return e.expectAck(ch)
 }
 
-func (e *BeamWriteEndpoint) SetMetadata(relPath string, entry transport.FileEntry, opts transport.MetadataOpts) error {
+func (e *WriteEndpoint) SetMetadata(
+	relPath string,
+	entry transport.FileEntry,
+	opts transport.MetadataOpts,
+) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -539,14 +668,16 @@ func (e *BeamWriteEndpoint) SetMetadata(relPath string, entry transport.FileEntr
 	if err != nil {
 		return err
 	}
-	if err := e.mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgSetMetadataReq, Payload: payload}); err != nil {
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgSetMetadataReq, Payload: payload},
+	); err != nil {
 		return err
 	}
 
 	return e.expectAck(ch)
 }
 
-func (e *BeamWriteEndpoint) Walk(fn func(entry transport.FileEntry) error) error {
+func (e *WriteEndpoint) Walk(fn func(entry transport.FileEntry) error) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -556,7 +687,9 @@ func (e *BeamWriteEndpoint) Walk(fn func(entry transport.FileEntry) error) error
 	if err != nil {
 		return err
 	}
-	if err := e.mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgWalkReq, Payload: payload}); err != nil {
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgWalkReq, Payload: payload},
+	); err != nil {
 		return err
 	}
 
@@ -581,7 +714,7 @@ func (e *BeamWriteEndpoint) Walk(fn func(entry transport.FileEntry) error) error
 	return errors.New("stream closed during walk")
 }
 
-func (e *BeamWriteEndpoint) Stat(relPath string) (transport.FileEntry, error) {
+func (e *WriteEndpoint) Stat(relPath string) (transport.FileEntry, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -591,7 +724,9 @@ func (e *BeamWriteEndpoint) Stat(relPath string) (transport.FileEntry, error) {
 	if err != nil {
 		return transport.FileEntry{}, err
 	}
-	if err := e.mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgStatReq, Payload: payload}); err != nil {
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgStatReq, Payload: payload},
+	); err != nil {
 		return transport.FileEntry{}, err
 	}
 
@@ -610,7 +745,7 @@ func (e *BeamWriteEndpoint) Stat(relPath string) (transport.FileEntry, error) {
 	return proto.ToFileEntry(resp.Entry), nil
 }
 
-func (e *BeamWriteEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
+func (e *WriteEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 
@@ -620,7 +755,9 @@ func (e *BeamWriteEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
 		e.mux.CloseStream(streamID)
 		return nil, err
 	}
-	if err := e.mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgOpenReadReq, Payload: payload}); err != nil {
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgOpenReadReq, Payload: payload},
+	); err != nil {
 		e.mux.CloseStream(streamID)
 		return nil, err
 	}
@@ -628,7 +765,7 @@ func (e *BeamWriteEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
 	return &beamReader{mux: e.mux, streamID: streamID, ch: ch}, nil
 }
 
-func (e *BeamWriteEndpoint) Hash(relPath string) (string, error) {
+func (e *WriteEndpoint) Hash(relPath string) (string, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -638,7 +775,9 @@ func (e *BeamWriteEndpoint) Hash(relPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := e.mux.Send(proto.Frame{StreamID: streamID, MsgType: proto.MsgHashReq, Payload: payload}); err != nil {
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgHashReq, Payload: payload},
+	); err != nil {
 		return "", err
 	}
 
@@ -657,11 +796,83 @@ func (e *BeamWriteEndpoint) Hash(relPath string) (string, error) {
 	return resp.Hash, nil
 }
 
-func (e *BeamWriteEndpoint) Root() string                { return e.root }
-func (e *BeamWriteEndpoint) Caps() transport.Capabilities { return e.caps }
-func (e *BeamWriteEndpoint) Close() error                 { return e.mux.Close() }
+// ComputeSignature asks the remote daemon to compute block signatures of a file.
+func (e *WriteEndpoint) ComputeSignature(
+	relPath string,
+	fileSize int64,
+) (transport.Signature, error) {
+	streamID := e.allocStream()
+	ch := e.mux.OpenStream(streamID)
+	defer e.mux.CloseStream(streamID)
 
-func (e *BeamWriteEndpoint) expectAck(ch <-chan proto.Frame) error {
+	req := proto.ComputeSignatureReq{RelPath: relPath, FileSize: fileSize}
+	payload, err := req.MarshalMsg(nil)
+	if err != nil {
+		return transport.Signature{}, err
+	}
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgComputeSignatureReq, Payload: payload},
+	); err != nil {
+		return transport.Signature{}, err
+	}
+
+	f, ok := <-ch
+	if !ok {
+		return transport.Signature{}, errors.New("stream closed")
+	}
+	if f.MsgType == proto.MsgErrorResp {
+		return transport.Signature{}, decodeError(f.Payload)
+	}
+	var resp proto.ComputeSignatureResp
+	if _, err := resp.UnmarshalMsg(f.Payload); err != nil {
+		return transport.Signature{}, err
+	}
+	return proto.ToSignature(resp.BlockSize, resp.Signatures), nil
+}
+
+// ApplyDelta asks the remote daemon to reconstruct a file from basis + delta ops.
+func (e *WriteEndpoint) ApplyDelta(
+	basisRelPath, tempRelPath string,
+	ops []transport.DeltaOp,
+) (int64, error) {
+	streamID := e.allocStream()
+	ch := e.mux.OpenStream(streamID)
+	defer e.mux.CloseStream(streamID)
+
+	req := proto.ApplyDeltaReq{
+		BasisRelPath: basisRelPath,
+		TempRelPath:  tempRelPath,
+		Ops:          proto.FromDeltaOps(ops),
+	}
+	payload, err := req.MarshalMsg(nil)
+	if err != nil {
+		return 0, err
+	}
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgApplyDeltaReq, Payload: payload},
+	); err != nil {
+		return 0, err
+	}
+
+	f, ok := <-ch
+	if !ok {
+		return 0, errors.New("stream closed")
+	}
+	if f.MsgType == proto.MsgErrorResp {
+		return 0, decodeError(f.Payload)
+	}
+	var resp proto.ApplyDeltaResp
+	if _, err := resp.UnmarshalMsg(f.Payload); err != nil {
+		return 0, err
+	}
+	return resp.BytesWritten, nil
+}
+
+func (e *WriteEndpoint) Root() string                 { return e.root }
+func (e *WriteEndpoint) Caps() transport.Capabilities { return e.caps }
+func (e *WriteEndpoint) Close() error                 { return e.mux.Close() }
+
+func (*WriteEndpoint) expectAck(ch <-chan proto.Frame) error {
 	f, ok := <-ch
 	if !ok {
 		return errors.New("stream closed")
@@ -680,10 +891,10 @@ func (e *BeamWriteEndpoint) expectAck(ch <-chan proto.Frame) error {
 // used for CreateTemp so the server handler processes them sequentially.
 type beamWriteFile struct {
 	mux      *proto.Mux
-	streamID uint32
 	ch       <-chan proto.Frame
 	handle   string
 	name     string
+	streamID uint32
 }
 
 func (f *beamWriteFile) Name() string { return f.name }
@@ -701,7 +912,9 @@ func (f *beamWriteFile) Write(p []byte) (int, error) {
 		if err != nil {
 			return total, err
 		}
-		if err := f.mux.Send(proto.Frame{StreamID: f.streamID, MsgType: proto.MsgWriteData, Payload: payload}); err != nil {
+		if err := f.mux.Send(
+			proto.Frame{StreamID: f.streamID, MsgType: proto.MsgWriteData, Payload: payload},
+		); err != nil {
 			return total, err
 		}
 
@@ -719,7 +932,9 @@ func (f *beamWriteFile) Close() error {
 	if err != nil {
 		return err
 	}
-	if err := f.mux.Send(proto.Frame{StreamID: f.streamID, MsgType: proto.MsgWriteDoneReq, Payload: payload}); err != nil {
+	if err := f.mux.Send(
+		proto.Frame{StreamID: f.streamID, MsgType: proto.MsgWriteDoneReq, Payload: payload},
+	); err != nil {
 		return err
 	}
 

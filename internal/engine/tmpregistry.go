@@ -6,39 +6,35 @@ import (
 )
 
 // tmpRegistry tracks in-progress temporary files for defense-in-depth cleanup.
-var globalTmpRegistry = &tmpRegistry{}
-
 type tmpRegistry struct {
-	mu    sync.Mutex
 	paths map[string]struct{}
+	mu    sync.Mutex
 }
 
-// RegisterTmp adds a temporary file path to the global registry.
-func RegisterTmp(path string) {
-	globalTmpRegistry.mu.Lock()
-	defer globalTmpRegistry.mu.Unlock()
-	if globalTmpRegistry.paths == nil {
-		globalTmpRegistry.paths = make(map[string]struct{})
-	}
-	globalTmpRegistry.paths[path] = struct{}{}
+func newTmpRegistry() *tmpRegistry {
+	return &tmpRegistry{paths: make(map[string]struct{})}
 }
 
-// DeregisterTmp removes a temporary file path from the global registry.
-func DeregisterTmp(path string) {
-	globalTmpRegistry.mu.Lock()
-	defer globalTmpRegistry.mu.Unlock()
-	delete(globalTmpRegistry.paths, path)
+func (r *tmpRegistry) register(path string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.paths[path] = struct{}{}
 }
 
-// CleanupTmpFiles removes all registered temporary files.
-func CleanupTmpFiles() {
-	globalTmpRegistry.mu.Lock()
-	paths := make([]string, 0, len(globalTmpRegistry.paths))
-	for p := range globalTmpRegistry.paths {
+func (r *tmpRegistry) deregister(path string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.paths, path)
+}
+
+func (r *tmpRegistry) cleanup() {
+	r.mu.Lock()
+	paths := make([]string, 0, len(r.paths))
+	for p := range r.paths {
 		paths = append(paths, p)
 	}
-	globalTmpRegistry.paths = nil
-	globalTmpRegistry.mu.Unlock()
+	r.paths = nil
+	r.mu.Unlock()
 
 	for _, p := range paths {
 		_ = os.Remove(p)

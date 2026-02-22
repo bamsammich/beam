@@ -31,7 +31,7 @@ func NewLocalReadEndpoint(root string) *LocalReadEndpoint {
 }
 
 func (e *LocalReadEndpoint) Walk(fn func(entry FileEntry) error) error {
-	return filepath.WalkDir(e.root, func(path string, d os.DirEntry, err error) error {
+	return filepath.WalkDir(e.root, func(path string, _ os.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip inaccessible entries
 		}
@@ -82,10 +82,10 @@ func (e *LocalReadEndpoint) Hash(relPath string) (string, error) {
 	return hashLocalFile(absPath)
 }
 
-func (e *LocalReadEndpoint) Root() string        { return e.root }
-func (e *LocalReadEndpoint) Close() error         { return nil }
+func (e *LocalReadEndpoint) Root() string { return e.root }
+func (*LocalReadEndpoint) Close() error   { return nil }
 
-func (e *LocalReadEndpoint) Caps() Capabilities {
+func (*LocalReadEndpoint) Caps() Capabilities {
 	return Capabilities{
 		SparseDetect:  true,
 		Hardlinks:     true,
@@ -93,6 +93,7 @@ func (e *LocalReadEndpoint) Caps() Capabilities {
 		AtomicRename:  true,
 		FastCopy:      true,
 		NativeHash:    true,
+		DeltaTransfer: true,
 	}
 }
 
@@ -103,7 +104,7 @@ func (e *LocalReadEndpoint) AbsPath(relPath string) string {
 	return filepath.Join(e.root, relPath)
 }
 
-func (e *LocalReadEndpoint) statAbsolute(absPath, relPath string) (FileEntry, error) {
+func (*LocalReadEndpoint) statAbsolute(absPath, relPath string) (FileEntry, error) {
 	info, err := os.Lstat(absPath)
 	if err != nil {
 		return FileEntry{}, err
@@ -126,6 +127,7 @@ func (e *LocalWriteEndpoint) MkdirAll(relPath string, perm os.FileMode) error {
 	return os.MkdirAll(absPath, perm)
 }
 
+//nolint:ireturn // implements WriteEndpoint interface
 func (e *LocalWriteEndpoint) CreateTemp(relPath string, perm os.FileMode) (WriteFile, error) {
 	absPath := filepath.Join(e.root, relPath)
 	dir := filepath.Dir(absPath)
@@ -179,22 +181,28 @@ func (e *LocalWriteEndpoint) SetMetadata(relPath string, entry FileEntry, opts M
 	}
 
 	if opts.Times {
-		atime := unix.Timespec{Nsec: unix.UTIME_OMIT}
-		atime = unix.NsecToTimespec(entry.AccTime.UnixNano())
+		atime := unix.NsecToTimespec(entry.AccTime.UnixNano())
 		mtime := unix.NsecToTimespec(entry.ModTime.UnixNano())
 		times := []unix.Timespec{atime, mtime}
-		if err := unix.UtimesNanoAt(unix.AT_FDCWD, absPath, times, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		if err := unix.UtimesNanoAt(
+			unix.AT_FDCWD,
+			absPath,
+			times,
+			unix.AT_SYMLINK_NOFOLLOW,
+		); err != nil {
 			return fmt.Errorf("utimensat %s: %w", relPath, err)
 		}
 	}
 
 	if opts.Owner {
-		_ = syscall.Lchown(absPath, int(entry.Uid), int(entry.Gid))
+		//nolint:errcheck // best-effort ownership; may fail without root
+		_ = syscall.Lchown(absPath, int(entry.UID), int(entry.GID))
 	}
 
 	return nil
 }
 
+//nolint:revive // cognitive-complexity: directory walk with multiple error checks
 func (e *LocalWriteEndpoint) Walk(fn func(entry FileEntry) error) error {
 	return filepath.WalkDir(e.root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -235,10 +243,10 @@ func (e *LocalWriteEndpoint) Hash(relPath string) (string, error) {
 	return hashLocalFile(absPath)
 }
 
-func (e *LocalWriteEndpoint) Root() string        { return e.root }
-func (e *LocalWriteEndpoint) Close() error         { return nil }
+func (e *LocalWriteEndpoint) Root() string { return e.root }
 
-func (e *LocalWriteEndpoint) Caps() Capabilities {
+func (*LocalWriteEndpoint) Close() error { return nil }
+func (*LocalWriteEndpoint) Caps() Capabilities {
 	return Capabilities{
 		SparseDetect:  true,
 		Hardlinks:     true,
@@ -246,6 +254,7 @@ func (e *LocalWriteEndpoint) Caps() Capabilities {
 		AtomicRename:  true,
 		FastCopy:      true,
 		NativeHash:    true,
+		DeltaTransfer: true,
 	}
 }
 
@@ -314,9 +323,9 @@ func fileInfoToEntry(info os.FileInfo, relPath, absPath string) (FileEntry, erro
 
 	// Extract Unix-specific metadata from syscall.Stat_t.
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
-		entry.Uid = stat.Uid
-		entry.Gid = stat.Gid
-		entry.Nlink = uint32(stat.Nlink)
+		entry.UID = stat.Uid
+		entry.GID = stat.Gid
+		entry.Nlink = uint32(stat.Nlink) //nolint:gosec // G115: nlink fits in uint32 on Linux
 		entry.Dev = stat.Dev
 		entry.Ino = stat.Ino
 		entry.AccTime = time.Unix(stat.Atim.Sec, stat.Atim.Nsec)

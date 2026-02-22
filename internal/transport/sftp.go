@@ -41,6 +41,7 @@ func NewSFTPReadEndpoint(sshClient *ssh.Client, root string) (*SFTPReadEndpoint,
 	}, nil
 }
 
+//nolint:revive // cognitive-complexity: SFTP walk with symlink resolution and error handling
 func (e *SFTPReadEndpoint) Walk(fn func(entry FileEntry) error) error {
 	walker := e.client.Walk(e.root)
 	for walker.Step() {
@@ -120,7 +121,7 @@ func (e *SFTPReadEndpoint) Hash(relPath string) (string, error) {
 
 func (e *SFTPReadEndpoint) Root() string { return e.root }
 
-func (e *SFTPReadEndpoint) Caps() Capabilities {
+func (*SFTPReadEndpoint) Caps() Capabilities {
 	return Capabilities{
 		SparseDetect: false,
 		Hardlinks:    false,
@@ -160,11 +161,12 @@ func NewSFTPWriteEndpoint(sshClient *ssh.Client, root string) (*SFTPWriteEndpoin
 	}, nil
 }
 
-func (e *SFTPWriteEndpoint) MkdirAll(relPath string, perm os.FileMode) error {
+func (e *SFTPWriteEndpoint) MkdirAll(relPath string, _ os.FileMode) error {
 	absPath := path.Join(e.root, relPath)
 	return e.client.MkdirAll(absPath)
 }
 
+//nolint:ireturn // implements WriteEndpoint interface
 func (e *SFTPWriteEndpoint) CreateTemp(relPath string, perm os.FileMode) (WriteFile, error) {
 	absPath := path.Join(e.root, relPath)
 	dir := path.Dir(absPath)
@@ -180,7 +182,7 @@ func (e *SFTPWriteEndpoint) CreateTemp(relPath string, perm os.FileMode) (WriteF
 	// Set permissions after creation since OpenFile doesn't accept a mode.
 	if err := e.client.Chmod(tmpPath, perm); err != nil {
 		f.Close()
-		_ = e.client.Remove(tmpPath)
+		_ = e.client.Remove(tmpPath) //nolint:errcheck // best-effort cleanup
 		return nil, fmt.Errorf("sftp chmod temp %s: %w", tmpPath, err)
 	}
 
@@ -192,7 +194,7 @@ func (e *SFTPWriteEndpoint) Rename(oldRel, newRel string) error {
 	oldAbs := path.Join(e.root, oldRel)
 	newAbs := path.Join(e.root, newRel)
 	// SFTP rename fails if target exists; remove first.
-	_ = e.client.Remove(newAbs)
+	_ = e.client.Remove(newAbs) //nolint:errcheck // best-effort cleanup
 	return e.client.Rename(oldAbs, newAbs)
 }
 
@@ -208,17 +210,18 @@ func (e *SFTPWriteEndpoint) RemoveAll(relPath string) error {
 
 func (e *SFTPWriteEndpoint) Symlink(target, newRel string) error {
 	absNew := path.Join(e.root, newRel)
-	_ = e.client.Remove(absNew)
+	_ = e.client.Remove(absNew) //nolint:errcheck // best-effort cleanup
 	return e.client.Symlink(target, absNew)
 }
 
 func (e *SFTPWriteEndpoint) Link(oldRel, newRel string) error {
 	oldAbs := path.Join(e.root, oldRel)
 	newAbs := path.Join(e.root, newRel)
-	_ = e.client.Remove(newAbs)
+	_ = e.client.Remove(newAbs) //nolint:errcheck // best-effort cleanup before link
 	return e.client.Link(oldAbs, newAbs)
 }
 
+//nolint:revive // cognitive-complexity: applies multiple metadata operations conditionally
 func (e *SFTPWriteEndpoint) SetMetadata(relPath string, entry FileEntry, opts MetadataOpts) error {
 	absPath := path.Join(e.root, relPath)
 
@@ -235,7 +238,7 @@ func (e *SFTPWriteEndpoint) SetMetadata(relPath string, entry FileEntry, opts Me
 	}
 
 	if opts.Owner {
-		if err := e.client.Chown(absPath, int(entry.Uid), int(entry.Gid)); err != nil {
+		if err := e.client.Chown(absPath, int(entry.UID), int(entry.GID)); err != nil {
 			// Ownership changes often fail on remote hosts without root.
 			// Silently ignore to match rsync behavior.
 			_ = err
@@ -246,6 +249,7 @@ func (e *SFTPWriteEndpoint) SetMetadata(relPath string, entry FileEntry, opts Me
 	return nil
 }
 
+//nolint:revive // cognitive-complexity: SFTP walk with symlink resolution and error handling
 func (e *SFTPWriteEndpoint) Walk(fn func(entry FileEntry) error) error {
 	walker := e.client.Walk(e.root)
 	for walker.Step() {
@@ -303,7 +307,7 @@ func (e *SFTPWriteEndpoint) Hash(relPath string) (string, error) {
 
 func (e *SFTPWriteEndpoint) Root() string { return e.root }
 
-func (e *SFTPWriteEndpoint) Caps() Capabilities {
+func (*SFTPWriteEndpoint) Caps() Capabilities {
 	return Capabilities{
 		SparseDetect: false,
 		Hardlinks:    false,
@@ -359,6 +363,8 @@ func hashReader(r io.Reader) (string, error) {
 }
 
 // removeAllSFTP recursively removes a directory over SFTP.
+//
+//nolint:revive // cognitive-complexity: recursive directory removal over SFTP
 func removeAllSFTP(client *sftp.Client, absPath string) error {
 	info, err := client.Lstat(absPath)
 	if err != nil {

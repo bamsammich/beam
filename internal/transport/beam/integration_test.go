@@ -9,17 +9,18 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bamsammich/beam/internal/engine"
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/transport"
 	"github.com/bamsammich/beam/internal/transport/beam"
 	"github.com/bamsammich/beam/internal/transport/proto"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // TestBeamToBeamTransfer exercises a full directory copy through the beam
-// protocol: source daemon → BeamReadEndpoint → BeamWriteEndpoint → dest daemon.
+// protocol: source daemon → ReadEndpoint → WriteEndpoint → dest daemon.
 // This mimics what the engine does for a beam-to-beam transfer.
 func TestBeamToBeamTransfer(t *testing.T) {
 	t.Parallel()
@@ -27,9 +28,22 @@ func TestBeamToBeamTransfer(t *testing.T) {
 	// --- Set up source tree ---
 	srcDir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "sub", "deep"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "root.txt"), []byte("root file content"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "sub", "mid.txt"), []byte("middle file"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "sub", "deep", "leaf.txt"), []byte("leaf content here"), 0o644))
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(srcDir, "root.txt"), []byte("root file content"), 0o644),
+	)
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(srcDir, "sub", "mid.txt"), []byte("middle file"), 0o644),
+	)
+	require.NoError(
+		t,
+		os.WriteFile(
+			filepath.Join(srcDir, "sub", "deep", "leaf.txt"),
+			[]byte("leaf content here"),
+			0o644,
+		),
+	)
 	// Large-ish file to test chunked transfer (bigger than DataChunkSize=256KB).
 	bigData := bytes.Repeat([]byte("ABCDEFGHIJKLMNOP"), 20000) // 320KB
 	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "big.bin"), bigData, 0o644))
@@ -51,8 +65,8 @@ func TestBeamToBeamTransfer(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
-	srcEP := beam.NewBeamReadEndpoint(srcMux, srcDir, srcCaps)
-	dstEP := beam.NewBeamWriteEndpoint(dstMux, dstDir, dstCaps)
+	srcEP := beam.NewReadEndpoint(srcMux, srcDir, srcCaps)
+	dstEP := beam.NewWriteEndpoint(dstMux, dstDir, dstCaps)
 
 	// --- Walk source, replicate to dest ---
 	var entries []transport.FileEntry
@@ -79,14 +93,14 @@ func TestBeamToBeamTransfer(t *testing.T) {
 		}
 
 		// Regular file: open, stream, atomic write.
-		rc, err := srcEP.OpenRead(entry.RelPath)
-		require.NoError(t, err)
+		rc, openErr := srcEP.OpenRead(entry.RelPath)
+		require.NoError(t, openErr)
 
-		wf, err := dstEP.CreateTemp(entry.RelPath, entry.Mode.Perm())
-		require.NoError(t, err)
+		wf, createErr := dstEP.CreateTemp(entry.RelPath, entry.Mode.Perm())
+		require.NoError(t, createErr)
 
-		_, err = io.Copy(wf, rc)
-		require.NoError(t, err)
+		_, copyErr := io.Copy(wf, rc)
+		require.NoError(t, copyErr)
 		require.NoError(t, rc.Close())
 		require.NoError(t, wf.Close())
 		require.NoError(t, dstEP.Rename(wf.Name(), entry.RelPath))
@@ -96,10 +110,10 @@ func TestBeamToBeamTransfer(t *testing.T) {
 
 	// 1. Regular files: content matches.
 	for _, name := range []string{"root.txt", "sub/mid.txt", "sub/deep/leaf.txt", "big.bin"} {
-		srcContent, err := os.ReadFile(filepath.Join(srcDir, name))
-		require.NoError(t, err, "read source %s", name)
-		dstContent, err := os.ReadFile(filepath.Join(dstDir, name))
-		require.NoError(t, err, "read dest %s", name)
+		srcContent, readSrcErr := os.ReadFile(filepath.Join(srcDir, name))
+		require.NoError(t, readSrcErr, "read source %s", name)
+		dstContent, readDstErr := os.ReadFile(filepath.Join(dstDir, name))
+		require.NoError(t, readDstErr, "read dest %s", name)
 		assert.Equal(t, srcContent, dstContent, "content mismatch for %s", name)
 	}
 
@@ -142,7 +156,7 @@ func TestBeamToBeamDeleteSync(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
-	dstEP := beam.NewBeamWriteEndpoint(dstMux, dstDir, dstCaps)
+	dstEP := beam.NewWriteEndpoint(dstMux, dstDir, dstCaps)
 
 	// Walk destination to find extraneous files.
 	srcFiles := map[string]bool{"keep.txt": true}
@@ -192,8 +206,8 @@ func TestBeamToBeamMetadata(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
-	srcEP := beam.NewBeamReadEndpoint(srcMux, srcDir, srcCaps)
-	dstEP := beam.NewBeamWriteEndpoint(dstMux, dstDir, dstCaps)
+	srcEP := beam.NewReadEndpoint(srcMux, srcDir, srcCaps)
+	dstEP := beam.NewWriteEndpoint(dstMux, dstDir, dstCaps)
 
 	// Copy the file.
 	entry, err := srcEP.Stat("meta.txt")
@@ -225,7 +239,7 @@ func TestBeamToBeamMetadata(t *testing.T) {
 }
 
 // TestBeamEndToEndEngineIntegration uses the actual engine to perform a copy
-// with a BeamWriteEndpoint as destination. This is the closest we can get to
+// with a WriteEndpoint as destination. This is the closest we can get to
 // what `beam -a /src beam://token@host/dst` does.
 func TestBeamEndToEndEngineIntegration(t *testing.T) {
 	t.Parallel()
@@ -233,7 +247,10 @@ func TestBeamEndToEndEngineIntegration(t *testing.T) {
 	srcDir := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(srcDir, "dir"), 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "dir", "a.txt"), []byte("file a"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "dir", "b.txt"), []byte("file b content"), 0o644))
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(srcDir, "dir", "b.txt"), []byte("file b content"), 0o644),
+	)
 
 	dstDir := t.TempDir()
 
@@ -243,7 +260,7 @@ func TestBeamEndToEndEngineIntegration(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
-	dstEP := beam.NewBeamWriteEndpoint(dstMux, dstDir, dstCaps)
+	dstEP := beam.NewWriteEndpoint(dstMux, dstDir, dstCaps)
 
 	// Use the engine to copy srcDir/dir/ → dstDir/ via beam endpoint.
 	ctx := context.Background()
@@ -251,6 +268,7 @@ func TestBeamEndToEndEngineIntegration(t *testing.T) {
 
 	// Drain events in background.
 	go func() {
+		//nolint:revive // empty-block: intentionally draining event channel
 		for range events {
 		}
 	}()

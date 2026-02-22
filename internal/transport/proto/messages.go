@@ -15,12 +15,12 @@ const (
 	MsgPongResp      byte = 0x04
 
 	// ReadEndpoint operations.
-	MsgWalkReq    byte = 0x10
-	MsgWalkEntry  byte = 0x11
-	MsgWalkEnd    byte = 0x12
-	MsgStatReq    byte = 0x13
-	MsgStatResp   byte = 0x14
-	MsgReadDirReq byte = 0x15
+	MsgWalkReq     byte = 0x10
+	MsgWalkEntry   byte = 0x11
+	MsgWalkEnd     byte = 0x12
+	MsgStatReq     byte = 0x13
+	MsgStatResp    byte = 0x14
+	MsgReadDirReq  byte = 0x15
 	MsgReadDirResp byte = 0x16
 	MsgOpenReadReq byte = 0x17
 	MsgReadData    byte = 0x18
@@ -43,24 +43,32 @@ const (
 	MsgLinkReq        byte = 0x2F
 	MsgSetMetadataReq byte = 0x31
 
+	// Delta transfer operations.
+	MsgComputeSignatureReq  byte = 0x50
+	MsgComputeSignatureResp byte = 0x51
+	MsgMatchBlocksReq       byte = 0x52
+	MsgMatchBlocksResp      byte = 0x53
+	MsgApplyDeltaReq        byte = 0x54
+	MsgApplyDeltaResp       byte = 0x55
+
 	// Utility.
-	MsgCapsReq  byte = 0x40
-	MsgCapsResp byte = 0x41
+	MsgCapsReq   byte = 0x40
+	MsgCapsResp  byte = 0x41
 	MsgErrorResp byte = 0xFF
 )
 
 // HandshakeReq is sent by the client on stream 0 after TLS connection.
 type HandshakeReq struct {
-	Version      int      `msg:"version"`
+	AuthToken    string   `msg:"auth_token"` //nolint:gosec // G117: field name is descriptive, not a credential leak
 	Capabilities []string `msg:"capabilities"`
-	AuthToken    string   `msg:"auth_token"`
+	Version      int      `msg:"version"`
 }
 
 // HandshakeResp is sent by the server on stream 0 in response to HandshakeReq.
 type HandshakeResp struct {
-	Version      int      `msg:"version"`
-	Capabilities []string `msg:"capabilities"`
 	Root         string   `msg:"root"`
+	Capabilities []string `msg:"capabilities"`
+	Version      int      `msg:"version"`
 }
 
 // PingReq is a keep-alive request on stream 0.
@@ -76,19 +84,19 @@ type PongResp struct {
 // FileEntryMsg is the wire representation of transport.FileEntry.
 // Uses map encoding (string keys) for backward compatibility.
 type FileEntryMsg struct {
+	LinkTarget string `msg:"link_target"`
 	RelPath    string `msg:"rel_path"`
 	Size       int64  `msg:"size"`
-	Mode       uint32 `msg:"mode"`
-	ModTime    int64  `msg:"mod_time"`  // unix nanoseconds
-	AccTime    int64  `msg:"acc_time"`  // unix nanoseconds
-	IsDir      bool   `msg:"is_dir"`
-	IsSymlink  bool   `msg:"is_symlink"`
-	LinkTarget string `msg:"link_target"`
-	UID        uint32 `msg:"uid"`
-	GID        uint32 `msg:"gid"`
-	Nlink      uint32 `msg:"nlink"`
-	Dev        uint64 `msg:"dev"`
 	Ino        uint64 `msg:"ino"`
+	ModTime    int64  `msg:"mod_time"`
+	AccTime    int64  `msg:"acc_time"`
+	Dev        uint64 `msg:"dev"`
+	GID        uint32 `msg:"gid"`
+	UID        uint32 `msg:"uid"`
+	Nlink      uint32 `msg:"nlink"`
+	Mode       uint32 `msg:"mode"`
+	IsSymlink  bool   `msg:"is_symlink"`
+	IsDir      bool   `msg:"is_dir"`
 }
 
 // WalkReq requests a recursive walk of the endpoint.
@@ -210,8 +218,8 @@ type LinkReq struct {
 
 // SetMetadataReq requests setting file metadata.
 type SetMetadataReq struct {
-	RelPath string       `msg:"rel_path"`
-	Entry   FileEntryMsg `msg:"entry"`
+	RelPath string          `msg:"rel_path"`
+	Entry   FileEntryMsg    `msg:"entry"`
 	Opts    MetadataOptsMsg `msg:"opts"`
 }
 
@@ -228,12 +236,65 @@ type CapsReq struct{}
 
 // CapsResp returns the server's capabilities.
 type CapsResp struct {
-	SparseDetect bool `msg:"sparse_detect"`
-	Hardlinks    bool `msg:"hardlinks"`
-	Xattrs       bool `msg:"xattrs"`
-	AtomicRename bool `msg:"atomic_rename"`
-	FastCopy     bool `msg:"fast_copy"`
-	NativeHash   bool `msg:"native_hash"`
+	SparseDetect  bool `msg:"sparse_detect"`
+	Hardlinks     bool `msg:"hardlinks"`
+	Xattrs        bool `msg:"xattrs"`
+	AtomicRename  bool `msg:"atomic_rename"`
+	FastCopy      bool `msg:"fast_copy"`
+	NativeHash    bool `msg:"native_hash"`
+	DeltaTransfer bool `msg:"delta_transfer"`
+}
+
+// BlockSignatureMsg is the wire representation of a block signature.
+type BlockSignatureMsg struct {
+	StrongHash []byte `msg:"strong_hash"`
+	Index      int    `msg:"index"`
+	Offset     int64  `msg:"offset"`
+	WeakHash   uint64 `msg:"weak_hash"`
+}
+
+// DeltaOpMsg is the wire representation of a delta operation.
+type DeltaOpMsg struct {
+	Literal  []byte `msg:"literal"`
+	BlockIdx int    `msg:"block_idx"`
+	Offset   int64  `msg:"offset"`
+	Length   int    `msg:"length"`
+}
+
+// ComputeSignatureReq asks the server to compute block signatures of a file.
+type ComputeSignatureReq struct {
+	RelPath  string `msg:"rel_path"`
+	FileSize int64  `msg:"file_size"`
+}
+
+// ComputeSignatureResp returns block signatures.
+type ComputeSignatureResp struct {
+	Signatures []BlockSignatureMsg `msg:"signatures"`
+	BlockSize  int                 `msg:"block_size"`
+}
+
+// MatchBlocksReq asks the server to match its file against provided signatures.
+type MatchBlocksReq struct {
+	RelPath    string              `msg:"rel_path"`
+	Signatures []BlockSignatureMsg `msg:"signatures"`
+	BlockSize  int                 `msg:"block_size"`
+}
+
+// MatchBlocksResp returns delta operations.
+type MatchBlocksResp struct {
+	Ops []DeltaOpMsg `msg:"ops"`
+}
+
+// ApplyDeltaReq asks the server to reconstruct a file from basis + ops.
+type ApplyDeltaReq struct {
+	BasisRelPath string       `msg:"basis_rel_path"`
+	TempRelPath  string       `msg:"temp_rel_path"`
+	Ops          []DeltaOpMsg `msg:"ops"`
+}
+
+// ApplyDeltaResp confirms delta application.
+type ApplyDeltaResp struct {
+	BytesWritten int64 `msg:"bytes_written"`
 }
 
 // ErrorResp is a generic error response for any request.

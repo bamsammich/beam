@@ -6,9 +6,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bamsammich/beam/internal/transport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bamsammich/beam/internal/transport"
 )
 
 func setupTestTree(t *testing.T) string {
@@ -17,8 +18,14 @@ func setupTestTree(t *testing.T) string {
 
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "sub", "deep"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "file.txt"), []byte("hello"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(root, "sub", "nested.txt"), []byte("nested content"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(root, "sub", "deep", "deep.txt"), []byte("deep"), 0644))
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(root, "sub", "nested.txt"), []byte("nested content"), 0644),
+	)
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(root, "sub", "deep", "deep.txt"), []byte("deep"), 0644),
+	)
 	require.NoError(t, os.Symlink("nested.txt", filepath.Join(root, "sub", "link")))
 
 	return root
@@ -46,7 +53,11 @@ func TestLocalReadEndpoint_Walk(t *testing.T) {
 	assert.True(t, relPaths["sub"], "should find sub/")
 	assert.True(t, relPaths[filepath.Join("sub", "nested.txt")], "should find sub/nested.txt")
 	assert.True(t, relPaths[filepath.Join("sub", "deep")], "should find sub/deep/")
-	assert.True(t, relPaths[filepath.Join("sub", "deep", "deep.txt")], "should find sub/deep/deep.txt")
+	assert.True(
+		t,
+		relPaths[filepath.Join("sub", "deep", "deep.txt")],
+		"should find sub/deep/deep.txt",
+	)
 }
 
 func TestLocalReadEndpoint_Stat(t *testing.T) {

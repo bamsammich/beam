@@ -8,19 +8,19 @@ import (
 
 // FileEntry describes a single filesystem entry with full metadata.
 type FileEntry struct {
-	RelPath   string
-	Size      int64
-	Mode      os.FileMode
-	ModTime   time.Time
-	AccTime   time.Time
-	IsDir     bool
-	IsSymlink bool
+	ModTime    time.Time
+	AccTime    time.Time
 	LinkTarget string
-	Uid       uint32
-	Gid       uint32
-	Nlink     uint32
-	Dev       uint64
-	Ino       uint64
+	RelPath    string
+	Size       int64
+	Ino        uint64
+	Dev        uint64
+	GID        uint32
+	UID        uint32
+	Nlink      uint32
+	Mode       os.FileMode
+	IsSymlink  bool
+	IsDir      bool
 }
 
 // Capabilities describes what a transport endpoint supports.
@@ -31,6 +31,7 @@ type Capabilities struct {
 	AtomicRename  bool
 	FastCopy      bool // local kernel-offload copy (copy_file_range, clonefile)
 	NativeHash    bool // can hash without transferring bytes to caller
+	DeltaTransfer bool // server supports ComputeSignature, MatchBlocks, ApplyDelta RPCs
 }
 
 // MetadataOpts controls which metadata to set.
