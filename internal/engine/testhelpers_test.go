@@ -5,6 +5,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -182,4 +184,131 @@ func createModifiedTestTree(t *testing.T, root string) {
 	copy(data[100:116], []byte("MODIFIED_BLOCK!!"))
 	require.NoError(t, os.WriteFile(bigPath, data, 0o644))
 	require.NoError(t, os.Chtimes(bigPath, futureTime, futureTime))
+}
+
+// createHardlinkTree populates root with files that include hardlinks:
+//
+//	original.txt   (21 bytes)
+//	hardlink.txt   → hardlink to original.txt
+//	sub/another.txt (23 bytes)
+func createHardlinkTree(t *testing.T, root string) {
+	t.Helper()
+
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "sub"), 0o755))
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(root, "original.txt"),
+		[]byte("original file content"),
+		0o644,
+	))
+
+	require.NoError(t, os.Link(
+		filepath.Join(root, "original.txt"),
+		filepath.Join(root, "hardlink.txt"),
+	))
+
+	require.NoError(t, os.WriteFile(
+		filepath.Join(root, "sub", "another.txt"),
+		[]byte("another file, different"),
+		0o644,
+	))
+}
+
+// createSparseFile creates a file at path with two data regions separated by a
+// hole. Layout: [dataSize bytes of 'A'] [holeSize gap] [dataSize bytes of 'B'].
+// Returns the apparent file size (2*dataSize + holeSize).
+//
+// If the filesystem does not support sparse files (e.g. tmpfs), the file is
+// still created but without holes — callers should handle this.
+func createSparseFile(t *testing.T, path string, dataSize, holeSize int64) int64 {
+	t.Helper()
+
+	f, err := os.Create(path)
+	require.NoError(t, err)
+	defer f.Close()
+
+	// First data region.
+	_, err = f.Write(bytes.Repeat([]byte("A"), int(dataSize)))
+	require.NoError(t, err)
+
+	// Seek past the hole.
+	_, err = f.Seek(dataSize+holeSize, 0)
+	require.NoError(t, err)
+
+	// Second data region.
+	_, err = f.Write(bytes.Repeat([]byte("B"), int(dataSize)))
+	require.NoError(t, err)
+
+	return 2*dataSize + holeSize
+}
+
+// collectEvents creates a buffered event channel that records all events.
+// Returns the channel for engine.Config and a function to retrieve collected
+// events. The getter closes the channel and waits for the drain goroutine,
+// so it is safe to read the slice. It may be called at most once. If the
+// getter is never called, t.Cleanup closes the channel on test exit.
+func collectEvents(t *testing.T) (chan<- event.Event, func() []event.Event) {
+	t.Helper()
+	ch := make(chan event.Event, 4096)
+	var collected []event.Event
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ev := range ch {
+			collected = append(collected, ev)
+		}
+	}()
+	var once sync.Once
+	drain := func() {
+		once.Do(func() { close(ch) })
+		<-done
+	}
+	t.Cleanup(drain)
+	return ch, func() []event.Event {
+		drain()
+		return collected
+	}
+}
+
+// findTmpFiles returns any .beam-tmp files found under root.
+func findTmpFiles(t *testing.T, root string) []string {
+	t.Helper()
+	var found []string
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if strings.HasSuffix(d.Name(), ".beam-tmp") {
+			found = append(found, path)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	return found
+}
+
+// verifyExistingFilesMatch checks that every regular file in dstRoot that also
+// exists in srcRoot has identical content. Files only in dstRoot are ignored.
+func verifyExistingFilesMatch(t *testing.T, srcRoot, dstRoot string) {
+	t.Helper()
+	err := filepath.WalkDir(dstRoot, func(path string, d os.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		rel, err := filepath.Rel(dstRoot, path)
+		require.NoError(t, err)
+
+		srcPath := filepath.Join(srcRoot, rel)
+		if _, statErr := os.Stat(srcPath); os.IsNotExist(statErr) {
+			return nil // file only in dst, skip
+		}
+
+		srcData, err := os.ReadFile(srcPath)
+		require.NoError(t, err, "read src %s", rel)
+		dstData, err := os.ReadFile(path)
+		require.NoError(t, err, "read dst %s", rel)
+		require.Equal(t, srcData, dstData, "content mismatch (interrupted copy?): %s", rel)
+		return nil
+	})
+	require.NoError(t, err)
 }
