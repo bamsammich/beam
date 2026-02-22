@@ -17,6 +17,8 @@ import (
 	"github.com/bamsammich/beam/internal/filter"
 	"github.com/bamsammich/beam/internal/stats"
 	"github.com/bamsammich/beam/internal/transport"
+	"github.com/bamsammich/beam/internal/transport/beam"
+	"github.com/bamsammich/beam/internal/transport/proto"
 	"github.com/bamsammich/beam/internal/ui"
 	"github.com/bamsammich/beam/internal/ui/tui"
 	"github.com/spf13/cobra"
@@ -71,6 +73,7 @@ func run() int {
 		sshPort        int
 		deltaFlag      bool
 		noDelta        bool
+		beamToken      string
 	)
 
 	chain := filter.NewChain()
@@ -124,44 +127,64 @@ func run() int {
 			}
 			dst := dstLoc.Path
 
-			// Resolve SSH endpoint(s). Exactly one of these will be non-nil
-			// when a remote location is involved.
+			// Resolve remote endpoint(s). Exactly one of these will be non-nil
+			// when a remote location is involved. The URL scheme determines
+			// which transport is used: beam:// uses the beam protocol,
+			// user@host:path uses SSH/SFTP.
 			var srcEndpoint transport.ReadEndpoint
 			var dstEndpoint transport.WriteEndpoint
 
 			if srcRemote {
 				loc := srcLocs[0]
-				sshClient, err := transport.DialSSH(loc.Host, loc.User, transport.SSHOpts{
-					Port:    sshPort,
-					KeyFile: sshKeyFile,
-				})
-				if err != nil {
-					return fmt.Errorf("ssh connect to %s: %w", loc.Host, err)
+				if loc.IsBeam() {
+					ep, err := dialBeamRead(loc, beamToken)
+					if err != nil {
+						return fmt.Errorf("beam connect to %s: %w", loc.Host, err)
+					}
+					srcEndpoint = ep
+					defer ep.Close()
+				} else {
+					sshClient, err := transport.DialSSH(loc.Host, loc.User, transport.SSHOpts{
+						Port:    sshPort,
+						KeyFile: sshKeyFile,
+					})
+					if err != nil {
+						return fmt.Errorf("ssh connect to %s: %w", loc.Host, err)
+					}
+					ep, err := transport.NewSFTPReadEndpoint(sshClient, loc.Path)
+					if err != nil {
+						sshClient.Close()
+						return fmt.Errorf("sftp session to %s: %w", loc.Host, err)
+					}
+					srcEndpoint = ep
+					defer ep.Close()
 				}
-				ep, err := transport.NewSFTPReadEndpoint(sshClient, loc.Path)
-				if err != nil {
-					sshClient.Close()
-					return fmt.Errorf("sftp session to %s: %w", loc.Host, err)
-				}
-				srcEndpoint = ep
-				defer ep.Close()
 			}
 
 			if dstLoc.IsRemote() {
-				sshClient, err := transport.DialSSH(dstLoc.Host, dstLoc.User, transport.SSHOpts{
-					Port:    sshPort,
-					KeyFile: sshKeyFile,
-				})
-				if err != nil {
-					return fmt.Errorf("ssh connect to %s: %w", dstLoc.Host, err)
+				if dstLoc.IsBeam() {
+					ep, err := dialBeamWrite(dstLoc, beamToken)
+					if err != nil {
+						return fmt.Errorf("beam connect to %s: %w", dstLoc.Host, err)
+					}
+					dstEndpoint = ep
+					defer ep.Close()
+				} else {
+					sshClient, err := transport.DialSSH(dstLoc.Host, dstLoc.User, transport.SSHOpts{
+						Port:    sshPort,
+						KeyFile: sshKeyFile,
+					})
+					if err != nil {
+						return fmt.Errorf("ssh connect to %s: %w", dstLoc.Host, err)
+					}
+					ep, err := transport.NewSFTPWriteEndpoint(sshClient, dstLoc.Path)
+					if err != nil {
+						sshClient.Close()
+						return fmt.Errorf("sftp session to %s: %w", dstLoc.Host, err)
+					}
+					dstEndpoint = ep
+					defer ep.Close()
 				}
-				ep, err := transport.NewSFTPWriteEndpoint(sshClient, dstLoc.Path)
-				if err != nil {
-					sshClient.Close()
-					return fmt.Errorf("sftp session to %s: %w", dstLoc.Host, err)
-				}
-				dstEndpoint = ep
-				defer ep.Close()
 			}
 
 			isRemote := srcRemote || dstLoc.IsRemote()
@@ -394,6 +417,10 @@ func run() int {
 	rootCmd.Flags().IntVar(&sshPort, "ssh-port", 22, "SSH port")
 	rootCmd.Flags().BoolVar(&deltaFlag, "delta", true, "use delta transfer for remote copies")
 	rootCmd.Flags().BoolVar(&noDelta, "no-delta", false, "disable delta transfer")
+	rootCmd.Flags().StringVar(&beamToken, "beam-token", "", "authentication token for beam:// connections")
+
+	// Register daemon subcommand.
+	rootCmd.AddCommand(daemonCmd)
 
 	// Mark --exclude and --include as allowing repeated use.
 	rootCmd.Flags().SetAnnotation("exclude", "cobra_annotation_one_required", nil)
@@ -437,4 +464,52 @@ type exitError struct {
 
 func (e *exitError) Error() string {
 	return fmt.Sprintf("exit code %d", e.code)
+}
+
+// dialBeamRead connects to a beam daemon and returns a BeamReadEndpoint.
+func dialBeamRead(loc transport.Location, flagToken string) (*beam.BeamReadEndpoint, error) {
+	token := flagToken
+	if token == "" {
+		token = loc.Token
+	}
+	if token == "" {
+		return nil, fmt.Errorf("beam:// requires an authentication token (use --beam-token or beam://token@host/path)")
+	}
+
+	addr := beamAddr(loc)
+	mux, root, caps, err := beam.DialBeam(addr, token, proto.ClientTLSConfig(true))
+	if err != nil {
+		return nil, err
+	}
+
+	_ = root // root is informational; path comes from loc
+	return beam.NewBeamReadEndpoint(mux, loc.Path, caps), nil
+}
+
+// dialBeamWrite connects to a beam daemon and returns a BeamWriteEndpoint.
+func dialBeamWrite(loc transport.Location, flagToken string) (*beam.BeamWriteEndpoint, error) {
+	token := flagToken
+	if token == "" {
+		token = loc.Token
+	}
+	if token == "" {
+		return nil, fmt.Errorf("beam:// requires an authentication token (use --beam-token or beam://token@host/path)")
+	}
+
+	addr := beamAddr(loc)
+	mux, root, caps, err := beam.DialBeam(addr, token, proto.ClientTLSConfig(true))
+	if err != nil {
+		return nil, err
+	}
+
+	_ = root
+	return beam.NewBeamWriteEndpoint(mux, loc.Path, caps), nil
+}
+
+func beamAddr(loc transport.Location) string {
+	port := loc.Port
+	if port == 0 {
+		port = transport.DefaultBeamPort
+	}
+	return fmt.Sprintf("%s:%d", loc.Host, port)
 }
