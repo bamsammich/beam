@@ -2,16 +2,23 @@ package transport
 
 import (
 	"fmt"
+	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
+// DefaultBeamPort is the default port for the beam protocol daemon.
+const DefaultBeamPort = 7223
+
 // Location represents a parsed source or destination argument.
 type Location struct {
-	Host string // empty for local
-	User string // empty = current user
-	Port int    // 0 = default (22)
-	Path string // absolute or relative path
+	Scheme string // "beam" for beam://, empty for local or SSH
+	Host   string // empty for local
+	User   string // empty = current user
+	Port   int    // 0 = default (22 for SSH, 7223 for beam)
+	Path   string // absolute or relative path
+	Token  string // beam:// auth token (from URL userinfo)
 }
 
 // IsRemote returns true if the location refers to a remote host.
@@ -19,8 +26,23 @@ func (l Location) IsRemote() bool {
 	return l.Host != ""
 }
 
+// IsBeam returns true if the location uses the beam:// protocol.
+func (l Location) IsBeam() bool {
+	return l.Scheme == "beam"
+}
+
 // String returns a human-readable representation.
 func (l Location) String() string {
+	if l.IsBeam() {
+		port := l.Port
+		if port == 0 {
+			port = DefaultBeamPort
+		}
+		if l.Token != "" {
+			return fmt.Sprintf("beam://%s@%s:%d%s", l.Token, l.Host, port, l.Path)
+		}
+		return fmt.Sprintf("beam://%s:%d%s", l.Host, port, l.Path)
+	}
 	if !l.IsRemote() {
 		return l.Path
 	}
@@ -33,16 +55,24 @@ func (l Location) String() string {
 // ParseLocation parses a CLI argument into a Location.
 //
 // Supported formats:
-//   - /absolute/path        → local
-//   - relative/path         → local
-//   - host:path             → remote (current user)
-//   - user@host:path        → remote
-//   - user@host:/abs/path   → remote
+//   - /absolute/path                  → local
+//   - relative/path                   → local
+//   - host:path                       → SSH remote (current user)
+//   - user@host:path                  → SSH remote
+//   - user@host:/abs/path             → SSH remote
+//   - beam://host/path                → beam protocol (default port 7223)
+//   - beam://host:port/path           → beam protocol
+//   - beam://token@host:port/path     → beam protocol with auth token
 //
 // Ambiguity rule: a bare "word" with no colon is always local. A path
 // containing ":" is only treated as remote if the part before the colon
 // contains no path separators (so "/foo:bar" and "./host:path" are local).
 func ParseLocation(arg string) Location {
+	// Check for beam:// URL scheme first.
+	if strings.HasPrefix(arg, "beam://") {
+		return parseBeamURL(arg)
+	}
+
 	// Absolute paths and paths starting with . are always local.
 	if filepath.IsAbs(arg) || strings.HasPrefix(arg, "./") || strings.HasPrefix(arg, "../") {
 		return Location{Path: arg}
@@ -86,5 +116,46 @@ func ParseLocation(arg string) Location {
 		Host: host,
 		User: user,
 		Path: pathPart,
+	}
+}
+
+// parseBeamURL parses a beam://[token@]host[:port]/path URL.
+func parseBeamURL(raw string) Location {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return Location{Path: raw}
+	}
+
+	host := u.Hostname()
+	if host == "" {
+		return Location{Path: raw}
+	}
+
+	port := 0
+	if p := u.Port(); p != "" {
+		port, err = strconv.Atoi(p)
+		if err != nil {
+			return Location{Path: raw}
+		}
+	}
+
+	// Path from URL starts with /; keep it as-is for beam protocol
+	// (the daemon interprets paths relative to its root).
+	path := u.Path
+	if path == "" {
+		path = "/"
+	}
+
+	var token string
+	if u.User != nil {
+		token = u.User.Username()
+	}
+
+	return Location{
+		Scheme: "beam",
+		Host:   host,
+		Port:   port,
+		Path:   path,
+		Token:  token,
 	}
 }

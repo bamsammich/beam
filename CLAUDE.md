@@ -32,6 +32,7 @@ The name is `beam`. The binary is `beam`. The GitHub org and module path should 
 | Checksums | BLAKE3 (`github.com/zeebo/blake3`) | Faster than MD5/SHA, parallelizable, correct |
 | Rolling hash (delta) | xxHash (`github.com/cespare/xxhash/v2`) | Faster than Adler-32 used by rsync |
 | SSH transport | `golang.org/x/crypto/ssh` + `github.com/pkg/sftp` | Standard, well-maintained |
+| Wire format | msgpack via `tinylib/msgp` (code-gen) | Zero-alloc, no reflection, backward-compatible map encoding |
 | Testing | stdlib `testing` + `testify` | Standard Go idioms |
 
 ---
@@ -96,6 +97,10 @@ internal/
 ```
 
 The scanner emits tasks as soon as files are discovered — copying begins before the full directory tree is walked. This is a meaningful improvement over rsync's behavior on large trees.
+
+### Protocol Backward Compatibility (STRICT)
+
+All beam protocol messages use msgpack map encoding (field names as string keys, NOT positional). New fields MUST be additive with zero-value defaults. Old clients MUST ignore unknown fields. Never remove or rename a field. This rule applies to all types in `internal/transport/proto/messages.go`.
 
 ---
 
@@ -452,12 +457,22 @@ Build in this sequence. Each phase is independently useful:
    - `user@host:path` CLI syntax parsing
    - Push-only delta transfer (xxHash + BLAKE3 block matching)
 
-7. **Phase 6b — Pull delta + custom protocol** (future)
-   - Pull (remote→local) delta transfer
-   - Custom binary protocol (when both ends are beam)
-   - Bidirectional delta negotiation
+7. **Phase 6b — Custom binary protocol** (complete)
+   - Standalone TCP daemon (`beam daemon`) serving files from a root directory
+   - msgpack wire format via `tinylib/msgp` (zero-alloc, map encoding for backward compat)
+   - Stream multiplexer over single TLS connection
+   - TLS + pre-shared bearer token authentication
+   - `beam://[token@]host[:port]/path` URL scheme
+   - Server-side BLAKE3 hashing (NativeHash capability)
+   - `BeamReadEndpoint` + `BeamWriteEndpoint` implementing transport interfaces
 
-8. **Phase 7 — Polish**
+8. **Phase 6c — Pull delta + bidirectional negotiation** (future)
+   - Pull delta over beam protocol (remote computes signatures, sends delta ops)
+   - Pull delta over SFTP (stream full remote file for client-side matching)
+   - Bidirectional delta negotiation when both ends are beam
+   - Auto-detect beam on remote: try `beam --server` over SSH, fall back to SFTP
+
+9. **Phase 7 — Polish**
    - `--benchmark` mode
    - `--bwlimit` rate limiting (token bucket)
    - Structured JSON logging
@@ -507,7 +522,12 @@ Before implementing, familiarize yourself with:
 - **Phase 2+3** — Event system, inline UI, filtering, and delete (PR #2)
 - **Phase 4** — BLAKE3 post-copy verification, mtime-based skip detection (PR #3)
 - **Phase 5** — TUI overhaul, config system, worker throttle, multi-source support (PR #4, #5)
-- **Phase 6a** — Transport abstraction, SFTP endpoints, SSH auth, push-only delta transfer (in progress)
+- **Phase 6a** — Transport abstraction, SFTP endpoints, SSH auth, push-only delta transfer (PR #6)
+- **Phase 6b** — Custom binary protocol with standalone TCP daemon, `beam://` URL scheme, msgpack wire format, TLS+bearer auth, stream multiplexer, server-side hashing
 
 ### Next Up
-- **Phase 6b** — Pull delta transfer, custom binary protocol (both ends are beam)
+- **Phase 6c** — Pull delta + bidirectional negotiation
+  - Pull delta over beam protocol (remote computes signatures, sends delta ops)
+  - Pull delta over SFTP (stream full remote file for client-side matching — slower but works without beam on remote)
+  - Bidirectional delta negotiation when both ends are beam
+  - Auto-detect beam on remote: try `beam --server` over SSH, fall back to SFTP
