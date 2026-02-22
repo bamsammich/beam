@@ -190,8 +190,6 @@ func createModifiedTestTree(t *testing.T, root string) {
 //	original.txt   (21 bytes)
 //	hardlink.txt   → hardlink to original.txt
 //	sub/another.txt (23 bytes)
-//
-//nolint:unused // used by TestIntegration_Hardlinks added in a subsequent commit
 func createHardlinkTree(t *testing.T, root string) {
 	t.Helper()
 

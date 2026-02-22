@@ -356,3 +356,55 @@ func TestIntegration_SparseFile(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, []byte("normal content"), normalData)
 }
+
+func TestIntegration_Hardlinks(t *testing.T) {
+	t.Parallel()
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	createHardlinkTree(t, srcDir)
+
+	result := engine.Run(context.Background(), engine.Config{
+		Sources:   []string{srcDir + "/"},
+		Dst:       dstDir,
+		Archive:   true,
+		Recursive: true,
+		Workers:   1, // serialize so the regular copy lands before the hardlink task
+		Events:    drainEvents(t),
+	})
+
+	require.NoError(t, result.Err)
+
+	// Both files should have the same content as the source.
+	srcData, err := os.ReadFile(filepath.Join(srcDir, "original.txt"))
+	require.NoError(t, err)
+
+	dstOriginal, err := os.ReadFile(filepath.Join(dstDir, "original.txt"))
+	require.NoError(t, err)
+	require.Equal(t, srcData, dstOriginal, "content mismatch: original.txt")
+
+	dstHardlink, err := os.ReadFile(filepath.Join(dstDir, "hardlink.txt"))
+	require.NoError(t, err)
+	require.Equal(t, srcData, dstHardlink, "content mismatch: hardlink.txt")
+
+	// Verify hardlink preserved: same inode.
+	origStat, err := os.Stat(filepath.Join(dstDir, "original.txt"))
+	require.NoError(t, err)
+	linkStat, err := os.Stat(filepath.Join(dstDir, "hardlink.txt"))
+	require.NoError(t, err)
+
+	origIno := origStat.Sys().(*syscall.Stat_t).Ino
+	linkIno := linkStat.Sys().(*syscall.Stat_t).Ino
+	require.Equal(t, origIno, linkIno, "hardlinked files should share the same inode")
+
+	// Verify non-hardlinked file has a different inode.
+	anotherStat, err := os.Stat(filepath.Join(dstDir, "sub", "another.txt"))
+	require.NoError(t, err)
+	anotherIno := anotherStat.Sys().(*syscall.Stat_t).Ino
+	require.NotEqual(t, origIno, anotherIno, "non-hardlinked file should have different inode")
+
+	// Stats should reflect hardlink creation.
+	require.GreaterOrEqual(t, result.Stats.HardlinksCreated, int64(1),
+		"at least one hardlink should be reported")
+}
