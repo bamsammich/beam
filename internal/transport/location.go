@@ -9,7 +9,7 @@ import (
 )
 
 // DefaultBeamPort is the default port for the beam protocol daemon.
-const DefaultBeamPort = 7223
+const DefaultBeamPort = 9876
 
 // Location represents a parsed source or destination argument.
 type Location struct {
@@ -60,7 +60,7 @@ func (l Location) String() string {
 //   - host:path                       → SSH remote (current user)
 //   - user@host:path                  → SSH remote
 //   - user@host:/abs/path             → SSH remote
-//   - beam://host/path                → beam protocol (default port 7223)
+//   - beam://host/path                → beam protocol (default port 9876)
 //   - beam://host:port/path           → beam protocol
 //   - beam://token@host:port/path     → beam protocol with auth token
 //
