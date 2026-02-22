@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bamsammich/beam/internal/engine"
+	"github.com/bamsammich/beam/internal/event"
 )
 
 func TestIntegration_LocalToLocal(t *testing.T) {
@@ -229,4 +230,61 @@ func TestIntegration_Delete(t *testing.T) {
 
 	_, err = os.Stat(filepath.Join(dstDir, "stale"))
 	require.True(t, os.IsNotExist(err), "stale/ dir should have been deleted")
+}
+
+func TestIntegration_InterruptAndResume(t *testing.T) {
+	t.Parallel()
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	createTestTree(t, srcDir)
+
+	// Phase 1: Interrupt after the first file completes.
+	ctx, cancel := context.WithCancel(context.Background())
+	evCh := make(chan event.Event, 4096)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for ev := range evCh {
+			if ev.Type == event.FileCompleted {
+				cancel()
+			}
+		}
+	}()
+
+	_ = engine.Run(ctx, engine.Config{
+		Sources:   []string{srcDir + "/"},
+		Dst:       dstDir,
+		Archive:   true,
+		Recursive: true,
+		Workers:   1, // serialize to make cancellation deterministic
+		Events:    evCh,
+	})
+	close(evCh)
+	<-done
+
+	// Verify: no .beam-tmp files left behind (atomic write cleanup).
+	tmpFiles := findTmpFiles(t, dstDir)
+	require.Empty(t, tmpFiles, "no .beam-tmp files should remain after interrupt")
+
+	// Verify: any files that exist in destination have correct content.
+	verifyExistingFilesMatch(t, srcDir, dstDir)
+
+	// Phase 2: Resume — re-run without cancellation.
+	result := engine.Run(context.Background(), engine.Config{
+		Sources:   []string{srcDir + "/"},
+		Dst:       dstDir,
+		Archive:   true,
+		Recursive: true,
+		Workers:   2,
+		Events:    drainEvents(t),
+	})
+
+	require.NoError(t, result.Err)
+	verifyTreeCopy(t, srcDir, dstDir)
+
+	// At least one file should have been skipped (copied in phase 1).
+	require.Positive(t, result.Stats.FilesSkipped,
+		"resume should skip previously completed files")
 }
