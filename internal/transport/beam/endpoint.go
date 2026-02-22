@@ -16,7 +16,7 @@ import (
 )
 
 // DefaultPort is the default beam daemon port.
-const DefaultPort = 7223
+const DefaultPort = 9876
 
 // DialBeam connects to a beam daemon, performs TLS handshake and protocol
 // handshake. Returns a running mux, the server root, and capabilities.
