@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -287,4 +288,71 @@ func TestIntegration_InterruptAndResume(t *testing.T) {
 	// At least one file should have been skipped (copied in phase 1).
 	require.Positive(t, result.Stats.FilesSkipped,
 		"resume should skip previously completed files")
+}
+
+func TestIntegration_SparseFile(t *testing.T) {
+	t.Parallel()
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+
+	// Create sparse file: 4KB data, 1MB hole, 4KB data.
+	const dataSize = 4096
+	const holeSize = 1024 * 1024 // 1 MB
+	sparseFile := filepath.Join(srcDir, "sparse.bin")
+	apparentSize := createSparseFile(t, sparseFile, dataSize, holeSize)
+
+	// Also create a small regular file for baseline.
+	require.NoError(t, os.WriteFile(
+		filepath.Join(srcDir, "normal.txt"),
+		[]byte("normal content"),
+		0o644,
+	))
+
+	result := engine.Run(context.Background(), engine.Config{
+		Sources:   []string{srcDir + "/"},
+		Dst:       dstDir,
+		Archive:   true,
+		Recursive: true,
+		Workers:   2,
+		Events:    drainEvents(t),
+	})
+
+	require.NoError(t, result.Err)
+
+	// Verify apparent size matches.
+	dstSparse := filepath.Join(dstDir, "sparse.bin")
+	dstInfo, err := os.Stat(dstSparse)
+	require.NoError(t, err)
+	require.Equal(t, apparentSize, dstInfo.Size(), "apparent size should match")
+
+	// Verify content matches byte-for-byte.
+	srcData, err := os.ReadFile(sparseFile)
+	require.NoError(t, err)
+	dstData, err := os.ReadFile(dstSparse)
+	require.NoError(t, err)
+	require.Equal(t, srcData, dstData, "sparse file content should match")
+
+	// Verify destination is actually sparse (fewer blocks than fully materialized).
+	// Skip this check if the filesystem doesn't support sparse files.
+	srcStat, err := os.Stat(sparseFile)
+	require.NoError(t, err)
+	srcBlocks := srcStat.Sys().(*syscall.Stat_t).Blocks
+	dstBlocks := dstInfo.Sys().(*syscall.Stat_t).Blocks
+
+	// Only assert sparseness if the SOURCE is actually sparse.
+	// tmpfs may materialize the hole, making both files non-sparse.
+	fullyMaterializedBlocks := (apparentSize + 511) / 512
+	if srcBlocks < fullyMaterializedBlocks/2 {
+		// Source is sparse — destination should be too.
+		require.Less(t, dstBlocks, fullyMaterializedBlocks/2,
+			"destination should preserve sparse structure")
+	} else {
+		t.Log("filesystem does not support sparse files, skipping sparseness check")
+	}
+
+	// Verify normal file copied correctly.
+	normalData, err := os.ReadFile(filepath.Join(dstDir, "normal.txt"))
+	require.NoError(t, err)
+	require.Equal(t, []byte("normal content"), normalData)
 }

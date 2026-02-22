@@ -221,8 +221,6 @@ func createHardlinkTree(t *testing.T, root string) {
 //
 // If the filesystem does not support sparse files (e.g. tmpfs), the file is
 // still created but without holes — callers should handle this.
-//
-//nolint:unused // used by TestIntegration_SparseFile added in a subsequent commit
 func createSparseFile(t *testing.T, path string, dataSize, holeSize int64) int64 {
 	t.Helper()
 
