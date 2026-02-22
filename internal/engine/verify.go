@@ -2,24 +2,25 @@ package engine
 
 import (
 	"context"
-	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/filter"
 	"github.com/bamsammich/beam/internal/stats"
+	"github.com/bamsammich/beam/internal/transport"
 )
 
 // VerifyConfig controls the post-copy verification pass.
 type VerifyConfig struct {
-	SrcRoot string
-	DstRoot string
-	Workers int
-	Filter  *filter.Chain
-	Events  chan<- event.Event
-	Stats   stats.Writer
+	SrcRoot     string
+	DstRoot     string
+	Workers     int
+	Filter      *filter.Chain
+	Events      chan<- event.Event
+	Stats       stats.Writer
+	SrcEndpoint transport.ReadEndpoint
+	DstEndpoint transport.WriteEndpoint
 }
 
 // VerifyResult holds the outcome of a verification pass.
@@ -38,6 +39,7 @@ type VerifyError struct {
 
 // Verify walks the destination tree and compares BLAKE3 checksums against
 // the source for every regular file. It fans out to cfg.Workers goroutines.
+// SrcEndpoint and DstEndpoint must be set by the caller.
 func Verify(ctx context.Context, cfg VerifyConfig) VerifyResult {
 	emitEvent(cfg.Events, event.Event{Type: event.VerifyStarted})
 
@@ -47,7 +49,7 @@ func Verify(ctx context.Context, cfg VerifyConfig) VerifyResult {
 	}
 
 	// Collect files to verify by walking destination.
-	files := collectVerifyFiles(ctx, cfg.DstRoot, cfg.SrcRoot, cfg.Filter)
+	files := collectVerifyFiles(ctx, cfg)
 
 	// Fan out to workers.
 	taskCh := make(chan string, workers*2)
@@ -66,10 +68,7 @@ func Verify(ctx context.Context, cfg VerifyConfig) VerifyResult {
 				default:
 				}
 
-				srcPath := filepath.Join(cfg.SrcRoot, relPath)
-				dstPath := filepath.Join(cfg.DstRoot, relPath)
-
-				srcHash, err := HashFile(srcPath)
+				srcHash, err := cfg.SrcEndpoint.Hash(relPath)
 				if err != nil {
 					// Source missing or unreadable — treat as mismatch.
 					mu.Lock()
@@ -89,7 +88,7 @@ func Verify(ctx context.Context, cfg VerifyConfig) VerifyResult {
 					continue
 				}
 
-				dstHash, err := HashFile(dstPath)
+				dstHash, err := cfg.DstEndpoint.Hash(relPath)
 				if err != nil {
 					mu.Lock()
 					result.Failed++
@@ -150,49 +149,36 @@ func Verify(ctx context.Context, cfg VerifyConfig) VerifyResult {
 }
 
 // collectVerifyFiles walks the destination tree and returns relative paths
-// of regular files that pass the filter.
-func collectVerifyFiles(ctx context.Context, dstRoot, srcRoot string, f *filter.Chain) []string {
+// of regular files that pass the filter and also exist in the source.
+func collectVerifyFiles(ctx context.Context, cfg VerifyConfig) []string {
 	var files []string
-	_ = filepath.WalkDir(dstRoot, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
+	_ = cfg.DstEndpoint.Walk(func(entry transport.FileEntry) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 		}
 
-		if d.IsDir() {
+		if entry.IsDir || entry.IsSymlink {
 			return nil
 		}
-		if !d.Type().IsRegular() {
-			return nil
-		}
-
-		relPath, err := filepath.Rel(dstRoot, path)
-		if err != nil {
+		if !entry.Mode.IsRegular() {
 			return nil
 		}
 
 		// Apply filter if configured.
-		if f != nil {
-			info, err := d.Info()
-			if err != nil {
-				return nil
-			}
-			if !f.Match(relPath, false, info.Size()) {
+		if cfg.Filter != nil {
+			if !cfg.Filter.Match(entry.RelPath, false, entry.Size) {
 				return nil
 			}
 		}
 
 		// Only verify files that also exist in source.
-		srcPath := filepath.Join(srcRoot, relPath)
-		if _, err := os.Lstat(srcPath); err != nil {
+		if _, err := cfg.SrcEndpoint.Stat(entry.RelPath); err != nil {
 			return nil
 		}
 
-		files = append(files, relPath)
+		files = append(files, entry.RelPath)
 		return nil
 	})
 	return files

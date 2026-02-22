@@ -16,6 +16,7 @@ import (
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/filter"
 	"github.com/bamsammich/beam/internal/stats"
+	"github.com/bamsammich/beam/internal/transport"
 	"github.com/bamsammich/beam/internal/ui"
 	"github.com/bamsammich/beam/internal/ui/tui"
 	"github.com/spf13/cobra"
@@ -66,6 +67,10 @@ func run() int {
 		filterFile     string
 		minSizeStr     string
 		maxSizeStr     string
+		sshKeyFile     string
+		sshPort        int
+		deltaFlag      bool
+		noDelta        bool
 	)
 
 	chain := filter.NewChain()
@@ -87,8 +92,80 @@ func run() int {
 				return nil
 			}
 
-			sources := args[:len(args)-1]
-			dst := args[len(args)-1]
+			rawSources := args[:len(args)-1]
+			rawDst := args[len(args)-1]
+
+			// Parse locations for remote detection.
+			dstLoc := transport.ParseLocation(rawDst)
+			var srcLocs []transport.Location
+			for _, s := range rawSources {
+				srcLocs = append(srcLocs, transport.ParseLocation(s))
+			}
+
+			// Validate: at most one side can be remote.
+			srcRemote := false
+			for _, loc := range srcLocs {
+				if loc.IsRemote() {
+					srcRemote = true
+					break
+				}
+			}
+			if srcRemote && dstLoc.IsRemote() {
+				return fmt.Errorf("remote-to-remote transfers are not supported; one side must be local")
+			}
+			if srcRemote && len(srcLocs) > 1 {
+				return fmt.Errorf("multiple remote sources are not supported")
+			}
+
+			// Build local path lists (engine.Config.Sources and .Dst use local paths).
+			sources := make([]string, len(rawSources))
+			for i, loc := range srcLocs {
+				sources[i] = loc.Path
+			}
+			dst := dstLoc.Path
+
+			// Resolve SSH endpoint(s). Exactly one of these will be non-nil
+			// when a remote location is involved.
+			var srcEndpoint transport.ReadEndpoint
+			var dstEndpoint transport.WriteEndpoint
+
+			if srcRemote {
+				loc := srcLocs[0]
+				sshClient, err := transport.DialSSH(loc.Host, loc.User, transport.SSHOpts{
+					Port:    sshPort,
+					KeyFile: sshKeyFile,
+				})
+				if err != nil {
+					return fmt.Errorf("ssh connect to %s: %w", loc.Host, err)
+				}
+				ep, err := transport.NewSFTPReadEndpoint(sshClient, loc.Path)
+				if err != nil {
+					sshClient.Close()
+					return fmt.Errorf("sftp session to %s: %w", loc.Host, err)
+				}
+				srcEndpoint = ep
+				defer ep.Close()
+			}
+
+			if dstLoc.IsRemote() {
+				sshClient, err := transport.DialSSH(dstLoc.Host, dstLoc.User, transport.SSHOpts{
+					Port:    sshPort,
+					KeyFile: sshKeyFile,
+				})
+				if err != nil {
+					return fmt.Errorf("ssh connect to %s: %w", dstLoc.Host, err)
+				}
+				ep, err := transport.NewSFTPWriteEndpoint(sshClient, dstLoc.Path)
+				if err != nil {
+					sshClient.Close()
+					return fmt.Errorf("sftp session to %s: %w", dstLoc.Host, err)
+				}
+				dstEndpoint = ep
+				defer ep.Close()
+			}
+
+			isRemote := srcRemote || dstLoc.IsRemote()
+			useDelta := deltaFlag && !noDelta && isRemote
 
 			// Load optional config file.
 			cfg, err := config.Load()
@@ -158,9 +235,9 @@ func run() int {
 			workerLimit.Store(int32(workers))
 
 			// Format source display string for presenters.
-			srcDisplay := sources[0]
-			if len(sources) > 1 {
-				srcDisplay = fmt.Sprintf("%s (+%d more)", sources[0], len(sources)-1)
+			srcDisplay := rawSources[0]
+			if len(rawSources) > 1 {
+				srcDisplay = fmt.Sprintf("%s (+%d more)", rawSources[0], len(rawSources)-1)
 			}
 
 			// Create presenter.
@@ -170,7 +247,7 @@ func run() int {
 				presenter = tui.NewPresenter(tui.Config{
 					Stats:       collector,
 					Workers:     workers,
-					DstRoot:     dst,
+					DstRoot:     rawDst,
 					SrcRoot:     srcDisplay,
 					Theme:       cfg.Theme,
 					WorkerLimit: workerLimit,
@@ -190,7 +267,7 @@ func run() int {
 					NoProgress: noProgress,
 					Stats:      collector,
 					Workers:    workers,
-					DstRoot:    dst,
+					DstRoot:    rawDst,
 				})
 			}
 
@@ -211,6 +288,9 @@ func run() int {
 				Verify:         verifyFlag,
 				NoTimes:        noTimes,
 				WorkerLimit:    workerLimit,
+				SrcEndpoint:    srcEndpoint,
+				DstEndpoint:    dstEndpoint,
+				Delta:          useDelta,
 			}
 
 			// Only set filter if it has rules/size constraints.
@@ -310,6 +390,10 @@ func run() int {
 	rootCmd.Flags().BoolVar(&noTimes, "no-times", false, "don't preserve mtime (disables skip detection on re-runs)")
 	rootCmd.Flags().StringVar(&minSizeStr, "min-size", "", "skip files smaller than SIZE (e.g. 1M, 100K)")
 	rootCmd.Flags().StringVar(&maxSizeStr, "max-size", "", "skip files larger than SIZE (e.g. 1G, 500M)")
+	rootCmd.Flags().StringVar(&sshKeyFile, "ssh-key", "", "SSH private key file (default: auto-detect)")
+	rootCmd.Flags().IntVar(&sshPort, "ssh-port", 22, "SSH port")
+	rootCmd.Flags().BoolVar(&deltaFlag, "delta", true, "use delta transfer for remote copies")
+	rootCmd.Flags().BoolVar(&noDelta, "no-delta", false, "disable delta transfer")
 
 	// Mark --exclude and --include as allowing repeated use.
 	rootCmd.Flags().SetAnnotation("exclude", "cobra_annotation_one_required", nil)

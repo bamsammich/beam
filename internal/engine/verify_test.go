@@ -9,6 +9,7 @@ import (
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/filter"
 	"github.com/bamsammich/beam/internal/stats"
+	"github.com/bamsammich/beam/internal/transport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -32,11 +33,13 @@ func TestVerify_MatchingFiles(t *testing.T) {
 	events := make(chan event.Event, 64)
 
 	vr := Verify(context.Background(), VerifyConfig{
-		SrcRoot: src,
-		DstRoot: dst,
-		Workers: 2,
-		Stats:   collector,
-		Events:  events,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		Workers:     2,
+		Stats:       collector,
+		Events:      events,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	})
 	close(events)
 
@@ -61,11 +64,13 @@ func TestVerify_CorruptedFile(t *testing.T) {
 	events := make(chan event.Event, 64)
 
 	vr := Verify(context.Background(), VerifyConfig{
-		SrcRoot: src,
-		DstRoot: dst,
-		Workers: 1,
-		Stats:   collector,
-		Events:  events,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		Workers:     1,
+		Stats:       collector,
+		Events:      events,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	})
 	close(events)
 
@@ -100,12 +105,14 @@ func TestVerify_FilterRespected(t *testing.T) {
 	events := make(chan event.Event, 64)
 
 	vr := Verify(context.Background(), VerifyConfig{
-		SrcRoot: src,
-		DstRoot: dst,
-		Workers: 1,
-		Filter:  chain,
-		Stats:   collector,
-		Events:  events,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		Workers:     1,
+		Filter:      chain,
+		Stats:       collector,
+		Events:      events,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	})
 	close(events)
 
@@ -139,11 +146,13 @@ func TestVerify_Events(t *testing.T) {
 	}()
 
 	Verify(context.Background(), VerifyConfig{
-		SrcRoot: src,
-		DstRoot: dst,
-		Workers: 1,
-		Stats:   collector,
-		Events:  events,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		Workers:     1,
+		Stats:       collector,
+		Events:      events,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	})
 	close(events)
 	<-done

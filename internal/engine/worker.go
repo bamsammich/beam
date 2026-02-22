@@ -3,17 +3,17 @@ package engine
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/platform"
 	"github.com/bamsammich/beam/internal/stats"
-	"github.com/google/uuid"
+	"github.com/bamsammich/beam/internal/transport"
 	"golang.org/x/sys/unix"
 )
 
@@ -31,19 +31,28 @@ type WorkerConfig struct {
 	Events        chan<- event.Event
 	DstRoot       string        // destination root for computing relative paths
 	WorkerLimit   *atomic.Int32 // runtime throttle; nil = all workers active
+	SrcEndpoint   transport.ReadEndpoint
+	DstEndpoint   transport.WriteEndpoint
+	Delta         bool // use delta transfer for remote copies
 }
 
 // WorkerPool manages a pool of copy workers.
 type WorkerPool struct {
-	cfg     WorkerConfig
-	iouring *platform.IOURingCopier
+	cfg       WorkerConfig
+	iouring   *platform.IOURingCopier
+	localFast bool // true when both endpoints are local — enables kernel copy offload
 }
 
 // NewWorkerPool creates a new worker pool.
+// Both SrcEndpoint and DstEndpoint must be set; DstRoot must be non-empty.
 func NewWorkerPool(cfg WorkerConfig) (*WorkerPool, error) {
 	wp := &WorkerPool{cfg: cfg}
 
-	if cfg.UseIOURing {
+	// Detect local fast-path for the data copy: kernel copy offload
+	// (copy_file_range, sendfile, io_uring) requires raw fds.
+	wp.localFast = isLocalEndpoints(cfg.SrcEndpoint, cfg.DstEndpoint)
+
+	if cfg.UseIOURing && wp.localFast {
 		copier, err := platform.NewIOURingCopier(64)
 		if err != nil {
 			return nil, fmt.Errorf("init io_uring: %w", err)
@@ -52,6 +61,13 @@ func NewWorkerPool(cfg WorkerConfig) (*WorkerPool, error) {
 	}
 
 	return wp, nil
+}
+
+// isLocalEndpoints returns true when both endpoints are local.
+func isLocalEndpoints(src transport.ReadEndpoint, dst transport.WriteEndpoint) bool {
+	_, srcLocal := src.(*transport.LocalReadEndpoint)
+	_, dstLocal := dst.(*transport.LocalWriteEndpoint)
+	return srcLocal && dstLocal
 }
 
 // Run starts workers that consume tasks. It blocks until all tasks are
@@ -140,14 +156,26 @@ func (wp *WorkerPool) processTask(ctx context.Context, task FileTask, workerID i
 	}
 }
 
+// relDst computes the destination-relative path for a task.
+func (wp *WorkerPool) relDst(absPath string) string {
+	rel, _ := filepath.Rel(wp.cfg.DstRoot, absPath)
+	return rel
+}
+
 func (wp *WorkerPool) createDirectory(task FileTask, workerID int) error {
-	err := os.MkdirAll(task.DstPath, os.FileMode(task.Mode).Perm())
-	if err != nil {
+	relDst := wp.relDst(task.DstPath)
+	if err := wp.cfg.DstEndpoint.MkdirAll(relDst, os.FileMode(task.Mode).Perm()); err != nil {
 		return fmt.Errorf("mkdir %s: %w", task.DstPath, err)
 	}
 
 	if wp.cfg.PreserveMode || wp.cfg.PreserveTimes || wp.cfg.PreserveOwner {
-		if err := wp.setDirMetadata(task); err != nil {
+		entry := taskToEntry(task)
+		opts := transport.MetadataOpts{
+			Mode:  wp.cfg.PreserveMode,
+			Times: wp.cfg.PreserveTimes,
+			Owner: wp.cfg.PreserveOwner,
+		}
+		if err := wp.cfg.DstEndpoint.SetMetadata(relDst, entry, opts); err != nil {
 			return err
 		}
 	}
@@ -158,12 +186,14 @@ func (wp *WorkerPool) createDirectory(task FileTask, workerID int) error {
 }
 
 func (wp *WorkerPool) createSymlink(task FileTask) error {
-	if err := os.MkdirAll(filepath.Dir(task.DstPath), 0755); err != nil {
-		return fmt.Errorf("create parent dir for symlink %s: %w", task.DstPath, err)
+	relDst := wp.relDst(task.DstPath)
+	relDir := filepath.Dir(relDst)
+	if relDir != "." {
+		if err := wp.cfg.DstEndpoint.MkdirAll(relDir, 0755); err != nil {
+			return fmt.Errorf("create parent dir for symlink %s: %w", task.DstPath, err)
+		}
 	}
-	_ = os.Remove(task.DstPath)
-
-	if err := os.Symlink(task.LinkTarget, task.DstPath); err != nil {
+	if err := wp.cfg.DstEndpoint.Symlink(task.LinkTarget, relDst); err != nil {
 		return fmt.Errorf("symlink %s -> %s: %w", task.DstPath, task.LinkTarget, err)
 	}
 
@@ -181,12 +211,15 @@ func (wp *WorkerPool) createHardlink(task FileTask, workerID int) error {
 	}
 	dstTarget := filepath.Join(filepath.Dir(task.DstPath), relTarget)
 
-	if err := os.MkdirAll(filepath.Dir(task.DstPath), 0755); err != nil {
-		return fmt.Errorf("create parent dir for hardlink %s: %w", task.DstPath, err)
+	relDst := wp.relDst(task.DstPath)
+	relDstTarget := wp.relDst(dstTarget)
+	relDir := filepath.Dir(relDst)
+	if relDir != "." {
+		if err := wp.cfg.DstEndpoint.MkdirAll(relDir, 0755); err != nil {
+			return fmt.Errorf("create parent dir for hardlink %s: %w", task.DstPath, err)
+		}
 	}
-	_ = os.Remove(task.DstPath)
-
-	if err := os.Link(dstTarget, task.DstPath); err != nil {
+	if err := wp.cfg.DstEndpoint.Link(relDstTarget, relDst); err != nil {
 		return fmt.Errorf("hardlink %s -> %s: %w", task.DstPath, dstTarget, err)
 	}
 
@@ -199,38 +232,47 @@ func (wp *WorkerPool) copyRegularFile(ctx context.Context, task FileTask, worker
 	wp.cfg.Stats.AddFilesScanned(1)
 	wp.emit(event.Event{Type: event.FileStarted, Path: task.DstPath, Size: task.Size, WorkerID: workerID})
 
-	dir := filepath.Dir(task.DstPath)
-	base := filepath.Base(task.DstPath)
-	tmpName := fmt.Sprintf(".%s.%s.beam-tmp", base, uuid.New().String()[:8])
-	tmpPath := filepath.Join(dir, tmpName)
+	relDst := wp.relDst(task.DstPath)
 
 	// Ensure parent directory exists (may race with dir task workers).
-	if err := os.MkdirAll(dir, 0755); err != nil {
-		wp.cfg.Stats.AddFilesFailed(1)
-		wp.emit(event.Event{Type: event.FileFailed, Path: task.DstPath, Size: task.Size, Error: err, WorkerID: workerID})
-		return fmt.Errorf("create parent dir %s: %w", dir, err)
+	relDir := filepath.Dir(relDst)
+	if relDir != "." {
+		if err := wp.cfg.DstEndpoint.MkdirAll(relDir, 0755); err != nil {
+			wp.cfg.Stats.AddFilesFailed(1)
+			wp.emit(event.Event{Type: event.FileFailed, Path: task.DstPath, Size: task.Size, Error: err, WorkerID: workerID})
+			return fmt.Errorf("create parent dir %s: %w", relDir, err)
+		}
 	}
 
-	RegisterTmp(tmpPath)
-	defer func() {
-		DeregisterTmp(tmpPath)
-		_ = os.Remove(tmpPath) // no-op if rename succeeded
-	}()
-
-	// Create tmp file.
-	tmpFd, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, os.FileMode(task.Mode).Perm())
+	// Create temp file on destination via endpoint.
+	tmpFile, err := wp.cfg.DstEndpoint.CreateTemp(relDst, os.FileMode(task.Mode).Perm())
 	if err != nil {
 		wp.cfg.Stats.AddFilesFailed(1)
 		wp.emit(event.Event{Type: event.FileFailed, Path: task.DstPath, Size: task.Size, Error: err, WorkerID: workerID})
-		return fmt.Errorf("create tmp %s: %w", tmpPath, err)
+		return fmt.Errorf("create temp for %s: %w", relDst, err)
 	}
+
+	tmpRelPath := tmpFile.Name()
+
+	// For local endpoints, register the tmp file for crash cleanup.
+	localTmpPath := ""
+	if localDst, ok := wp.cfg.DstEndpoint.(*transport.LocalWriteEndpoint); ok {
+		localTmpPath = localDst.AbsPath(tmpRelPath)
+		RegisterTmp(localTmpPath)
+	}
+	defer func() {
+		if localTmpPath != "" {
+			DeregisterTmp(localTmpPath)
+		}
+		_ = wp.cfg.DstEndpoint.Remove(tmpRelPath)
+	}()
 
 	// Copy data.
 	var totalBytes int64
 	if task.Size > 0 {
-		totalBytes, err = wp.copyData(task, tmpFd)
+		totalBytes, err = wp.copyFileData(task, tmpFile)
 		if err != nil {
-			tmpFd.Close()
+			tmpFile.Close()
 			wp.cfg.Stats.AddFilesFailed(1)
 			wp.emit(event.Event{Type: event.FileFailed, Path: task.DstPath, Size: task.Size, Error: err, WorkerID: workerID})
 			return fmt.Errorf("copy data %s: %w", task.SrcPath, err)
@@ -238,24 +280,24 @@ func (wp *WorkerPool) copyRegularFile(ctx context.Context, task FileTask, worker
 	}
 
 	// Set metadata before rename.
-	if err := wp.setFileMetadata(task, tmpFd); err != nil {
-		tmpFd.Close()
+	if err := wp.setMetadata(task, tmpFile, tmpRelPath); err != nil {
+		tmpFile.Close()
 		wp.cfg.Stats.AddFilesFailed(1)
 		wp.emit(event.Event{Type: event.FileFailed, Path: task.DstPath, Size: task.Size, Error: err, WorkerID: workerID})
 		return fmt.Errorf("set metadata %s: %w", task.DstPath, err)
 	}
 
-	if err := tmpFd.Close(); err != nil {
+	if err := tmpFile.Close(); err != nil {
 		wp.cfg.Stats.AddFilesFailed(1)
 		wp.emit(event.Event{Type: event.FileFailed, Path: task.DstPath, Size: task.Size, Error: err, WorkerID: workerID})
-		return fmt.Errorf("close tmp %s: %w", tmpPath, err)
+		return fmt.Errorf("close temp %s: %w", tmpRelPath, err)
 	}
 
 	// Atomic rename.
-	if err := os.Rename(tmpPath, task.DstPath); err != nil {
+	if err := wp.cfg.DstEndpoint.Rename(tmpRelPath, relDst); err != nil {
 		wp.cfg.Stats.AddFilesFailed(1)
 		wp.emit(event.Event{Type: event.FileFailed, Path: task.DstPath, Size: task.Size, Error: err, WorkerID: workerID})
-		return fmt.Errorf("rename %s -> %s: %w", tmpPath, task.DstPath, err)
+		return fmt.Errorf("rename %s -> %s: %w", tmpRelPath, relDst, err)
 	}
 
 	wp.cfg.Stats.AddFilesCopied(1)
@@ -265,13 +307,112 @@ func (wp *WorkerPool) copyRegularFile(ctx context.Context, task FileTask, worker
 	return nil
 }
 
-func (wp *WorkerPool) copyData(task FileTask, dstFd *os.File) (int64, error) {
+// copyFileData copies file content from source to destination. When both
+// endpoints are local, it extracts the raw *os.File and uses kernel copy
+// offload (copy_file_range, sendfile, io_uring). Otherwise it streams via
+// io.Copy, with optional delta transfer for remote destinations.
+func (wp *WorkerPool) copyFileData(task FileTask, tmpFile transport.WriteFile) (int64, error) {
+	// Local fast-path: extract raw fd for kernel copy offload.
+	if dstFd := transport.LocalFile(tmpFile); dstFd != nil && wp.localFast {
+		return wp.copyDataLocal(task, dstFd)
+	}
+
+	// Delta transfer: when enabled and a basis file exists on the destination.
+	if wp.cfg.Delta && task.Size >= transport.DeltaMinFileSize() {
+		relDst := wp.relDst(task.DstPath)
+		if dstEntry, err := wp.cfg.DstEndpoint.Stat(relDst); err == nil && dstEntry.Size > 0 {
+			n, err := wp.copyDataDelta(task, tmpFile, relDst)
+			if err == nil {
+				return n, nil
+			}
+			// Delta failed — fall through to full stream copy.
+		}
+	}
+
+	// Stream path: read from source endpoint, write to dest file.
+	relSrc, _ := filepath.Rel(wp.cfg.SrcEndpoint.Root(), task.SrcPath)
+	srcReader, err := wp.cfg.SrcEndpoint.OpenRead(relSrc)
+	if err != nil {
+		return 0, fmt.Errorf("open source %s: %w", relSrc, err)
+	}
+	defer srcReader.Close()
+
+	n, err := io.Copy(tmpFile, srcReader)
+	return n, err
+}
+
+// copyDataDelta uses rsync-style delta transfer: compute signatures of the
+// existing destination file, match blocks against the source, and write only
+// changed regions to the temp file.
+func (wp *WorkerPool) copyDataDelta(task FileTask, tmpFile transport.WriteFile, relDst string) (int64, error) {
+	// Read the existing destination file for block signatures.
+	dstReader, err := wp.cfg.DstEndpoint.OpenRead(relDst)
+	if err != nil {
+		return 0, err
+	}
+
+	dstEntry, _ := wp.cfg.DstEndpoint.Stat(relDst)
+	sig, err := transport.ComputeSignature(dstReader, dstEntry.Size)
+	dstReader.Close()
+	if err != nil {
+		return 0, err
+	}
+
+	// Read source and match against basis signatures.
+	relSrc, _ := filepath.Rel(wp.cfg.SrcEndpoint.Root(), task.SrcPath)
+	srcReader, err := wp.cfg.SrcEndpoint.OpenRead(relSrc)
+	if err != nil {
+		return 0, err
+	}
+
+	ops, err := transport.MatchBlocks(srcReader, sig)
+	srcReader.Close()
+	if err != nil {
+		return 0, err
+	}
+
+	// Re-open basis file for applying delta.
+	basisReader, err := wp.cfg.DstEndpoint.OpenRead(relDst)
+	if err != nil {
+		return 0, err
+	}
+	defer basisReader.Close()
+
+	// basisReader must support seeking for ApplyDelta.
+	basisSeeker, ok := basisReader.(io.ReadSeeker)
+	if !ok {
+		return 0, fmt.Errorf("destination endpoint does not support seeking for delta")
+	}
+
+	countWriter := &countingWriter{w: tmpFile}
+	if err := transport.ApplyDelta(basisSeeker, ops, countWriter); err != nil {
+		return 0, err
+	}
+
+	return countWriter.n, nil
+}
+
+// countingWriter wraps an io.Writer and counts bytes written.
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	cw.n += int64(n)
+	return n, err
+}
+
+// copyDataLocal copies file data using platform fast-paths (copy_file_range,
+// sendfile, io_uring). Handles sparse segments and chunked transfers.
+func (wp *WorkerPool) copyDataLocal(task FileTask, dstFd *os.File) (int64, error) {
 	// Sparse-aware copy: only copy data segments.
 	if len(task.Segments) > 0 {
 		return wp.copySegments(task, dstFd)
 	}
 
-	// Simple whole-file copy (possibly chunked).
+	// Chunked copy for large files.
 	if len(task.Chunks) > 0 {
 		var total int64
 		for _, chunk := range task.Chunks {
@@ -334,7 +475,25 @@ func (wp *WorkerPool) doCopy(params platform.CopyFileParams) (platform.CopyResul
 	return platform.CopyFile(params)
 }
 
-func (wp *WorkerPool) setFileMetadata(task FileTask, fd *os.File) error {
+// setMetadata sets file metadata. For local endpoints, uses fd-based syscalls
+// for xattr support. For remote endpoints, uses the endpoint's SetMetadata.
+func (wp *WorkerPool) setMetadata(task FileTask, tmpFile transport.WriteFile, tmpRelPath string) error {
+	// For local files, use fd-based operations for xattr and precise mtime control.
+	if fd := transport.LocalFile(tmpFile); fd != nil && wp.localFast {
+		return wp.setFileMetadataLocal(task, fd)
+	}
+
+	entry := taskToEntry(task)
+	opts := transport.MetadataOpts{
+		Mode:  wp.cfg.PreserveMode,
+		Times: !wp.cfg.NoTimes,
+		Owner: wp.cfg.PreserveOwner,
+	}
+	return wp.cfg.DstEndpoint.SetMetadata(tmpRelPath, entry, opts)
+}
+
+// setFileMetadataLocal sets metadata via raw fd syscalls (local fast path).
+func (wp *WorkerPool) setFileMetadataLocal(task FileTask, fd *os.File) error {
 	rawFd := int(fd.Fd())
 
 	if wp.cfg.PreserveMode {
@@ -372,30 +531,6 @@ func (wp *WorkerPool) setFileMetadata(task FileTask, fd *os.File) error {
 	// Ownership last — may fail without CAP_CHOWN.
 	if wp.cfg.PreserveOwner {
 		_ = unix.Fchown(rawFd, int(task.Uid), int(task.Gid))
-	}
-
-	return nil
-}
-
-func (wp *WorkerPool) setDirMetadata(task FileTask) error {
-	if wp.cfg.PreserveMode {
-		if err := os.Chmod(task.DstPath, os.FileMode(task.Mode).Perm()); err != nil {
-			return fmt.Errorf("chmod dir %s: %w", task.DstPath, err)
-		}
-	}
-
-	if wp.cfg.PreserveTimes {
-		times := []unix.Timespec{
-			unix.NsecToTimespec(task.AccTime.UnixNano()),
-			unix.NsecToTimespec(task.ModTime.UnixNano()),
-		}
-		if err := unix.UtimesNanoAt(unix.AT_FDCWD, task.DstPath, times, 0); err != nil {
-			return fmt.Errorf("utimensat dir %s: %w", task.DstPath, err)
-		}
-	}
-
-	if wp.cfg.PreserveOwner {
-		_ = syscall.Lchown(task.DstPath, int(task.Uid), int(task.Gid))
 	}
 
 	return nil
@@ -450,4 +585,15 @@ func parseXattrNames(buf []byte) []string {
 		}
 	}
 	return names
+}
+
+// taskToEntry converts a FileTask to a transport.FileEntry for metadata operations.
+func taskToEntry(task FileTask) transport.FileEntry {
+	return transport.FileEntry{
+		Mode:    os.FileMode(task.Mode),
+		ModTime: task.ModTime,
+		AccTime: task.AccTime,
+		Uid:     task.Uid,
+		Gid:     task.Gid,
+	}
 }

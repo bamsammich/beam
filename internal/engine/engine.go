@@ -15,6 +15,7 @@ import (
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/filter"
 	"github.com/bamsammich/beam/internal/stats"
+	"github.com/bamsammich/beam/internal/transport"
 )
 
 // Config describes a copy operation.
@@ -37,6 +38,9 @@ type Config struct {
 	Verify         bool              // post-copy BLAKE3 checksum verification
 	NoTimes        bool              // disable mtime preservation (disables skip detection)
 	WorkerLimit    *atomic.Int32     // runtime worker throttle; nil = no throttling
+	SrcEndpoint    transport.ReadEndpoint  // nil = local (created from Sources)
+	DstEndpoint    transport.WriteEndpoint // nil = local (created from Dst)
+	Delta          bool                    // use delta transfer for remote copies
 }
 
 func (c Config) emit(e event.Event) {
@@ -150,6 +154,22 @@ func Run(ctx context.Context, cfg Config) Result {
 	return runMultiSourceCopy(ctx, cfg, collector, resolved)
 }
 
+// ensureSrcEndpoint returns the configured endpoint or creates a local one.
+func ensureSrcEndpoint(ep transport.ReadEndpoint, root string) transport.ReadEndpoint {
+	if ep != nil {
+		return ep
+	}
+	return transport.NewLocalReadEndpoint(root)
+}
+
+// ensureDstEndpoint returns the configured endpoint or creates a local one.
+func ensureDstEndpoint(ep transport.WriteEndpoint, root string) transport.WriteEndpoint {
+	if ep != nil {
+		return ep
+	}
+	return transport.NewLocalWriteEndpoint(root)
+}
+
 func runMultiSourceCopy(ctx context.Context, cfg Config, collector stats.ReadWriter, sources []resolvedSource) Result {
 	var copyErr error
 
@@ -172,6 +192,11 @@ func runMultiSourceCopy(ctx context.Context, cfg Config, collector stats.ReadWri
 		TotalSize: totalBytes,
 	})
 
+	// Worker pool endpoints: SrcEndpoint rooted at "/" so filepath.Rel works
+	// for any absolute source path. DstEndpoint rooted at cfg.Dst.
+	workerSrcEP := ensureSrcEndpoint(cfg.SrcEndpoint, "/")
+	workerDstEP := ensureDstEndpoint(cfg.DstEndpoint, cfg.Dst)
+
 	workerCfg := WorkerConfig{
 		NumWorkers:    cfg.Workers,
 		PreserveMode:  cfg.Archive,
@@ -185,6 +210,9 @@ func runMultiSourceCopy(ctx context.Context, cfg Config, collector stats.ReadWri
 		Events:        cfg.Events,
 		DstRoot:       cfg.Dst,
 		WorkerLimit:   cfg.WorkerLimit,
+		SrcEndpoint:   workerSrcEP,
+		DstEndpoint:   workerDstEP,
+		Delta:         cfg.Delta,
 	}
 
 	wp, err := NewWorkerPool(workerCfg)
@@ -237,6 +265,11 @@ func runMultiSourceCopy(ctx context.Context, cfg Config, collector stats.ReadWri
 				continue
 			}
 
+			// Per-source endpoints: rooted at the source/dest pair so
+			// relative paths in scanner/delete/verify match the endpoint root.
+			srcEP := ensureSrcEndpoint(cfg.SrcEndpoint, rs.srcPath)
+			dstEP := ensureDstEndpoint(cfg.DstEndpoint, rs.dstBase)
+
 			scanCfg := ScannerConfig{
 				SrcRoot:        rs.srcPath,
 				DstRoot:        rs.dstBase,
@@ -247,6 +280,8 @@ func runMultiSourceCopy(ctx context.Context, cfg Config, collector stats.ReadWri
 				Events:         cfg.Events,
 				Filter:         cfg.Filter,
 				Stats:          collector,
+				SrcEndpoint:    srcEP,
+				DstEndpoint:    dstEP,
 			}
 
 			scanner := NewScanner(scanCfg)
@@ -319,11 +354,13 @@ func runMultiSourceCopy(ctx context.Context, cfg Config, collector stats.ReadWri
 				continue
 			}
 			delCfg := DeleteConfig{
-				SrcRoot: rs.srcPath,
-				DstRoot: rs.dstBase,
-				Filter:  cfg.Filter,
-				DryRun:  cfg.DryRun,
-				Events:  cfg.Events,
+				SrcRoot:     rs.srcPath,
+				DstRoot:     rs.dstBase,
+				Filter:      cfg.Filter,
+				DryRun:      cfg.DryRun,
+				Events:      cfg.Events,
+				SrcEndpoint: ensureSrcEndpoint(cfg.SrcEndpoint, rs.srcPath),
+				DstEndpoint: ensureDstEndpoint(cfg.DstEndpoint, rs.dstBase),
 			}
 			if _, err := DeleteExtraneous(ctx, delCfg); err != nil && copyErr == nil {
 				copyErr = err
@@ -338,12 +375,14 @@ func runMultiSourceCopy(ctx context.Context, cfg Config, collector stats.ReadWri
 				continue
 			}
 			vr := Verify(ctx, VerifyConfig{
-				SrcRoot: rs.srcPath,
-				DstRoot: rs.dstBase,
-				Workers: cfg.Workers,
-				Filter:  cfg.Filter,
-				Events:  cfg.Events,
-				Stats:   collector,
+				SrcRoot:     rs.srcPath,
+				DstRoot:     rs.dstBase,
+				Workers:     cfg.Workers,
+				Filter:      cfg.Filter,
+				Events:      cfg.Events,
+				Stats:       collector,
+				SrcEndpoint: ensureSrcEndpoint(cfg.SrcEndpoint, rs.srcPath),
+				DstEndpoint: ensureDstEndpoint(cfg.DstEndpoint, rs.dstBase),
 			})
 			if vr.Failed > 0 && copyErr == nil {
 				copyErr = fmt.Errorf("%d files failed verification", vr.Failed)
@@ -368,10 +407,15 @@ func runFileCopy(ctx context.Context, cfg Config, collector stats.ReadWriter, rs
 		dst = cfg.Dst
 	}
 
+	dstDir := filepath.Dir(dst)
+
 	// Ensure parent directory exists.
-	if err := os.MkdirAll(filepath.Dir(dst), 0755); err != nil {
+	if err := os.MkdirAll(dstDir, 0755); err != nil {
 		return Result{Err: fmt.Errorf("create parent dir: %w", err)}
 	}
+
+	srcEP := ensureSrcEndpoint(cfg.SrcEndpoint, filepath.Dir(rs.srcPath))
+	dstEP := ensureDstEndpoint(cfg.DstEndpoint, dstDir)
 
 	workerCfg := WorkerConfig{
 		NumWorkers:    1,
@@ -383,6 +427,10 @@ func runFileCopy(ctx context.Context, cfg Config, collector stats.ReadWriter, rs
 		DryRun:        cfg.DryRun,
 		UseIOURing:    cfg.UseIOURing,
 		Stats:         collector,
+		DstRoot:       dstDir,
+		SrcEndpoint:   srcEP,
+		DstEndpoint:   dstEP,
+		Delta:         cfg.Delta,
 	}
 
 	wp, err := NewWorkerPool(workerCfg)
