@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+	"golang.org/x/time/rate"
 
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/platform"
@@ -25,6 +26,7 @@ type WorkerConfig struct {
 	Stats         stats.Writer
 	Events        chan<- event.Event
 	WorkerLimit   *atomic.Int32 // runtime throttle; nil = all workers active
+	BWLimiter     *rate.Limiter // shared bandwidth limiter; nil = unlimited
 	SrcEndpoint   transport.ReadEndpoint
 	DstEndpoint   transport.WriteEndpoint
 	DstRoot       string // destination root for computing relative paths
@@ -463,13 +465,20 @@ func (wp *WorkerPool) copyFileData(task FileTask, tmpFile transport.WriteFile) (
 	}
 	defer srcReader.Close()
 
-	n, err := io.Copy(tmpFile, srcReader)
+	var r io.Reader = srcReader
+	if wp.cfg.BWLimiter != nil {
+		r = newRateLimitedReader(context.Background(), srcReader, wp.cfg.BWLimiter)
+	}
+
+	n, err := io.Copy(tmpFile, r)
 	return n, err
 }
 
 // copyDataDelta uses rsync-style delta transfer: compute signatures of the
 // existing destination file, match blocks against the source, and write only
 // changed regions to the temp file.
+//
+//nolint:revive // cognitive-complexity: sequential sig→match→apply pipeline with bw limit wrapping
 func (wp *WorkerPool) copyDataDelta(
 	task FileTask,
 	tmpFile transport.WriteFile,
@@ -521,7 +530,11 @@ func (wp *WorkerPool) copyDataDelta(
 		return 0, errors.New("destination endpoint does not support seeking for delta")
 	}
 
-	countWriter := &countingWriter{w: tmpFile}
+	var w io.Writer = tmpFile
+	if wp.cfg.BWLimiter != nil {
+		w = &rateLimitedWriter{w: tmpFile, limiter: wp.cfg.BWLimiter, ctx: context.Background()}
+	}
+	countWriter := &countingWriter{w: w}
 	if err := transport.ApplyDelta(basisSeeker, ops, countWriter); err != nil {
 		return 0, err
 	}
@@ -752,20 +765,14 @@ func (wp *WorkerPool) setFileMetadataLocal(task FileTask, fd *os.File) error {
 	// Always preserve mtime so skip detection (size + mtime) works on re-runs.
 	// In archive mode, also preserve atime. --no-times disables both.
 	if !wp.cfg.NoTimes {
-		atime := unix.Timespec{Nsec: unix.UTIME_OMIT}
-		if wp.cfg.PreserveTimes {
-			atime = unix.NsecToTimespec(task.AccTime.UnixNano())
-		}
-		times := []unix.Timespec{
-			atime,
-			unix.NsecToTimespec(task.ModTime.UnixNano()),
-		}
-		if err := unix.UtimesNanoAt(rawFd, "", times, unix.AT_EMPTY_PATH); err != nil {
-			// Fallback: some systems don't support AT_EMPTY_PATH.
-			path := fd.Name()
-			if err2 := unix.UtimesNanoAt(unix.AT_FDCWD, path, times, 0); err2 != nil {
-				return fmt.Errorf("utimensat: %w", err)
-			}
+		if err := setFileTimes(
+			rawFd,
+			fd.Name(),
+			task.AccTime,
+			task.ModTime,
+			wp.cfg.PreserveTimes,
+		); err != nil {
+			return err
 		}
 	}
 

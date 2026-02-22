@@ -79,15 +79,6 @@ func CopyReadWrite(params CopyFileParams) (CopyResult, error) {
 	return copyReadWrite(params)
 }
 
-// preallocate attempts to pre-allocate disk space. Errors are ignored as
-// fallocate is not supported on all filesystems.
-//
-//nolint:gosec // G115: fd values are small non-negative integers
-func preallocate(fd *os.File, size int64) {
-	//nolint:errcheck // fallocate is advisory; not supported on all filesystems
-	unix.Fallocate(int(fd.Fd()), 0, 0, size)
-}
-
 // copyLength returns the effective byte count to copy.
 func copyLength(params CopyFileParams) int64 {
 	if params.Length > 0 {

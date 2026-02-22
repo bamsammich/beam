@@ -77,6 +77,9 @@ func run() int {
 		deltaFlag      bool
 		noDelta        bool
 		beamToken      string
+		bwLimitStr     string
+		logFile        string
+		benchmarkFlag  bool
 	)
 
 	chain := filter.NewChain()
@@ -204,6 +207,20 @@ func run() int {
 			// Apply config defaults for flags not explicitly set on CLI.
 			applyConfigDefaults(cmd, cfg.Defaults, &verifyFlag, &workers, &tuiFlag, &archive)
 
+			// Apply bwlimit from config if not set on CLI.
+			if !cmd.Flags().Changed("bwlimit") && cfg.Defaults.BWLimit != nil {
+				bwLimitStr = *cfg.Defaults.BWLimit
+			}
+
+			// Parse bandwidth limit.
+			var bwLimit int64
+			if bwLimitStr != "" {
+				bwLimit, err = filter.ParseSize(bwLimitStr)
+				if err != nil {
+					return fmt.Errorf("invalid --bwlimit: %w", err)
+				}
+			}
+
 			// Configure logging.
 			logLevel := slog.LevelWarn
 			if verbose {
@@ -211,9 +228,22 @@ func run() int {
 			} else if !quiet {
 				logLevel = slog.LevelInfo
 			}
-			logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			textHandler := slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
 				Level: logLevel,
-			}))
+			})
+			var logHandler slog.Handler = textHandler
+			if logFile != "" {
+				lf, lfErr := os.Create(logFile)
+				if lfErr != nil {
+					return fmt.Errorf("open log file: %w", lfErr)
+				}
+				defer lf.Close()
+				jsonHandler := slog.NewJSONHandler(lf, &slog.HandlerOptions{
+					Level: slog.LevelDebug,
+				})
+				logHandler = ui.NewMultiHandler(textHandler, jsonHandler)
+			}
+			logger := slog.New(logHandler)
 			slog.SetDefault(logger)
 
 			if dryRun {
@@ -221,8 +251,22 @@ func run() int {
 			}
 
 			// Default workers.
+			workersExplicit := cmd.Flags().Changed("workers")
 			if workers <= 0 {
 				workers = min(runtime.NumCPU()*2, 32)
+			}
+
+			// Benchmark mode: measure throughput and auto-tune workers.
+			if benchmarkFlag {
+				benchResult, benchErr := engine.RunBenchmark(context.Background(), sources[0], dst)
+				if benchErr != nil {
+					slog.Warn("benchmark failed", "error", benchErr)
+				} else {
+					fmt.Fprintln(os.Stderr, engine.FormatBenchmark(benchResult))
+					if !workersExplicit {
+						workers = benchResult.SuggestedWorkers
+					}
+				}
 			}
 
 			// Load filter file if specified.
@@ -257,6 +301,30 @@ func run() int {
 
 			// Create events channel.
 			events := make(chan event.Event, 256)
+
+			// When --log is set, tee events through a logging goroutine
+			// that writes structured records before forwarding to the presenter.
+			presenterEvents := (<-chan event.Event)(events)
+			if logFile != "" {
+				teed := make(chan event.Event, 256)
+				go func() {
+					for ev := range events {
+						attrs := []slog.Attr{
+							slog.String("type", ev.Type.String()),
+							slog.String("path", ev.Path),
+							slog.Int64("size", ev.Size),
+							slog.Int("worker", ev.WorkerID),
+						}
+						if ev.Error != nil {
+							attrs = append(attrs, slog.String("error", ev.Error.Error()))
+						}
+						slog.LogAttrs(context.Background(), slog.LevelInfo, "beam.event", attrs...)
+						teed <- ev
+					}
+					close(teed)
+				}()
+				presenterEvents = teed
+			}
 
 			// Create worker throttle.
 			workerLimit := &atomic.Int32{}
@@ -320,6 +388,7 @@ func run() int {
 				SrcEndpoint:    srcEndpoint,
 				DstEndpoint:    dstEndpoint,
 				Delta:          useDelta,
+				BWLimit:        bwLimit,
 			}
 
 			// Only set filter if it has rules/size constraints.
@@ -354,7 +423,7 @@ func run() int {
 				}()
 
 				// TUI runs in foreground — blocks until user quits.
-				_ = presenter.Run(events) //nolint:errcheck // presenter error is non-fatal
+				_ = presenter.Run(presenterEvents) //nolint:errcheck // presenter error is non-fatal
 
 				// User quit the TUI — cancel engine if still running.
 				engineCancel()
@@ -367,7 +436,7 @@ func run() int {
 				presenterWg.Add(1)
 				go func() {
 					defer presenterWg.Done()
-					presenterErr = presenter.Run(events)
+					presenterErr = presenter.Run(presenterEvents)
 				}()
 
 				result = engine.Run(ctx, engineCfg)
@@ -441,9 +510,16 @@ func run() int {
 	rootCmd.Flags().BoolVar(&noDelta, "no-delta", false, "disable delta transfer")
 	rootCmd.Flags().
 		StringVar(&beamToken, "beam-token", "", "authentication token for beam:// connections")
+	rootCmd.Flags().
+		StringVar(&bwLimitStr, "bwlimit", "", "bandwidth limit (e.g. 100M, 1G)")
+	rootCmd.Flags().
+		StringVar(&logFile, "log", "", "write structured JSON log to FILE")
+	rootCmd.Flags().
+		BoolVar(&benchmarkFlag, "benchmark", false, "measure throughput before copy and auto-tune workers")
 
-	// Register daemon subcommand.
+	// Register subcommands.
 	rootCmd.AddCommand(daemonCmd)
+	rootCmd.AddCommand(docsCmd)
 
 	// Mark --exclude and --include as allowing repeated use.
 	if err := rootCmd.Flags().

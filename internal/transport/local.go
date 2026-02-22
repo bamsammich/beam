@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/google/uuid"
 	"github.com/zeebo/blake3"
@@ -325,10 +324,8 @@ func fileInfoToEntry(info os.FileInfo, relPath, absPath string) (FileEntry, erro
 	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
 		entry.UID = stat.Uid
 		entry.GID = stat.Gid
-		entry.Nlink = uint32(stat.Nlink) //nolint:gosec // G115: nlink fits in uint32 on Linux
-		entry.Dev = stat.Dev
-		entry.Ino = stat.Ino
-		entry.AccTime = time.Unix(stat.Atim.Sec, stat.Atim.Nsec)
+		entry.Nlink = uint32(stat.Nlink) //nolint:gosec // G115: nlink fits in uint32
+		fillStatFields(stat, &entry)
 	}
 
 	return entry, nil

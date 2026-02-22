@@ -1,4 +1,4 @@
-.PHONY: build test vet lint clean
+.PHONY: build test vet lint clean docs release
 
 BIN := bin/beam
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
@@ -13,5 +13,14 @@ test:
 vet:
 	go vet ./...
 
+lint:
+	golangci-lint run ./...
+
+docs:
+	go run $(LDFLAGS) ./cmd/beam gen-docs --dir docs/man --format man
+
 clean:
 	rm -rf bin/
+
+release:
+	goreleaser release --clean
