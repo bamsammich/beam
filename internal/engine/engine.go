@@ -13,6 +13,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/time/rate"
+
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/filter"
 	"github.com/bamsammich/beam/internal/stats"
@@ -42,6 +44,7 @@ type Config struct {
 	Verify         bool
 	NoTimes        bool
 	Delta          bool
+	BWLimit        int64 // bytes per second; 0 = unlimited
 }
 
 func (c Config) emit(e event.Event) {
@@ -120,6 +123,15 @@ func resolveSources(sources []string, dst string, recursive bool) ([]resolvedSou
 	}
 
 	return resolved, nil
+}
+
+// bwLimiter returns a shared rate.Limiter for the given Config, or nil if no
+// bandwidth limit is configured.
+func bwLimiter(cfg Config) *rate.Limiter {
+	if cfg.BWLimit <= 0 {
+		return nil
+	}
+	return NewBWLimiter(cfg.BWLimit)
 }
 
 // Run executes a copy operation, blocking until complete.
@@ -236,6 +248,7 @@ func runMultiSourceCopy(
 		Events:        cfg.Events,
 		DstRoot:       cfg.Dst,
 		WorkerLimit:   cfg.WorkerLimit,
+		BWLimiter:     bwLimiter(cfg),
 		SrcEndpoint:   workerSrcEP,
 		DstEndpoint:   workerDstEP,
 		Delta:         cfg.Delta,
@@ -460,6 +473,7 @@ func runFileCopy(
 		UseIOURing:    cfg.UseIOURing,
 		Stats:         collector,
 		DstRoot:       dstDir,
+		BWLimiter:     bwLimiter(cfg),
 		SrcEndpoint:   srcEP,
 		DstEndpoint:   dstEP,
 		Delta:         cfg.Delta,
