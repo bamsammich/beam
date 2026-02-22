@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -20,27 +21,27 @@ import (
 
 // Config describes a copy operation.
 type Config struct {
-	Sources        []string
+	Stats          stats.ReadWriter
+	SrcEndpoint    transport.ReadEndpoint
+	DstEndpoint    transport.WriteEndpoint
+	Events         chan<- event.Event
+	Filter         *filter.Chain
+	WorkerLimit    *atomic.Int32
 	Dst            string
+	Sources        []string
+	ScanWorkers    int
+	Workers        int
+	ChunkThreshold int64
 	Recursive      bool
 	Archive        bool
-	Workers        int
-	ScanWorkers    int
-	ChunkThreshold int64
 	DryRun         bool
 	Verbose        bool
 	Quiet          bool
 	UseIOURing     bool
-	Events         chan<- event.Event // nil = no events emitted
-	Stats          stats.ReadWriter  // nil = engine creates its own
-	Filter         *filter.Chain     // nil = no filtering
-	Delete         bool              // delete extraneous files from destination
-	Verify         bool              // post-copy BLAKE3 checksum verification
-	NoTimes        bool              // disable mtime preservation (disables skip detection)
-	WorkerLimit    *atomic.Int32     // runtime worker throttle; nil = no throttling
-	SrcEndpoint    transport.ReadEndpoint  // nil = local (created from Sources)
-	DstEndpoint    transport.WriteEndpoint // nil = local (created from Dst)
-	Delta          bool                    // use delta transfer for remote copies
+	Delete         bool
+	Verify         bool
+	NoTimes        bool
+	Delta          bool
 }
 
 func (c Config) emit(e event.Event) {
@@ -56,18 +57,18 @@ func (c Config) emit(e event.Event) {
 
 // Result is the outcome of a copy operation.
 type Result struct {
-	Stats stats.Snapshot
 	Err   error
+	Stats stats.Snapshot
 }
 
 // resolvedSource represents a single source after resolving trailing-slash
 // semantics and computing the destination base path.
 type resolvedSource struct {
-	srcPath      string      // absolute, cleaned path
-	dstBase      string      // computed destination for this source
+	info         os.FileInfo
+	srcPath      string // absolute, cleaned path
+	dstBase      string // computed destination for this source
 	isFile       bool
 	copyContents bool // trailing slash on dir = copy contents, not dir itself
-	info         os.FileInfo
 }
 
 // resolveSources resolves each raw source argument into a resolvedSource,
@@ -75,6 +76,8 @@ type resolvedSource struct {
 //   - dir/  → copy contents of dir into dst
 //   - dir   → copy dir itself into dst (creates dst/dir/)
 //   - file  → copy file into dst
+//
+//nolint:revive // cognitive-complexity: rsync-compatible source resolution with trailing-slash semantics
 func resolveSources(sources []string, dst string, recursive bool) ([]resolvedSource, error) {
 	resolved := make([]resolvedSource, 0, len(sources))
 
@@ -120,9 +123,11 @@ func resolveSources(sources []string, dst string, recursive bool) ([]resolvedSou
 }
 
 // Run executes a copy operation, blocking until complete.
+//
+//nolint:revive // cognitive-complexity: top-level orchestrator with necessary branching
 func Run(ctx context.Context, cfg Config) Result {
 	if len(cfg.Sources) == 0 {
-		return Result{Err: fmt.Errorf("no sources specified")}
+		return Result{Err: errors.New("no sources specified")}
 	}
 
 	// Archive implies recursive + all preserve flags.
@@ -147,7 +152,12 @@ func Run(ctx context.Context, cfg Config) Result {
 	// file, that's an error when we have multiple sources or directory sources.
 	if len(resolved) > 1 {
 		if dstInfo, err := os.Stat(cfg.Dst); err == nil && !dstInfo.IsDir() {
-			return Result{Err: fmt.Errorf("destination %s is not a directory (multiple sources require a directory destination)", cfg.Dst)}
+			return Result{
+				Err: fmt.Errorf(
+					"destination %s is not a directory (multiple sources require a directory destination)",
+					cfg.Dst,
+				),
+			}
 		}
 	}
 
@@ -155,7 +165,12 @@ func Run(ctx context.Context, cfg Config) Result {
 }
 
 // ensureSrcEndpoint returns the configured endpoint or creates a local one.
-func ensureSrcEndpoint(ep transport.ReadEndpoint, root string) transport.ReadEndpoint {
+//
+//nolint:ireturn // factory returns interface by design
+func ensureSrcEndpoint(
+	ep transport.ReadEndpoint,
+	root string,
+) transport.ReadEndpoint {
 	if ep != nil {
 		return ep
 	}
@@ -163,14 +178,25 @@ func ensureSrcEndpoint(ep transport.ReadEndpoint, root string) transport.ReadEnd
 }
 
 // ensureDstEndpoint returns the configured endpoint or creates a local one.
-func ensureDstEndpoint(ep transport.WriteEndpoint, root string) transport.WriteEndpoint {
+//
+//nolint:ireturn // factory returns interface by design
+func ensureDstEndpoint(
+	ep transport.WriteEndpoint,
+	root string,
+) transport.WriteEndpoint {
 	if ep != nil {
 		return ep
 	}
 	return transport.NewLocalWriteEndpoint(root)
 }
 
-func runMultiSourceCopy(ctx context.Context, cfg Config, collector stats.ReadWriter, sources []resolvedSource) Result {
+//nolint:gocyclo,revive // cyclomatic: top-level orchestrator — prescan, scan, worker dispatch, delete, verify
+func runMultiSourceCopy(
+	ctx context.Context,
+	cfg Config,
+	collector stats.ReadWriter,
+	sources []resolvedSource,
+) Result {
 	var copyErr error
 
 	// Prescan all directory sources for progress totals.
@@ -396,7 +422,13 @@ func runMultiSourceCopy(ctx context.Context, cfg Config, collector stats.ReadWri
 	}
 }
 
-func runFileCopy(ctx context.Context, cfg Config, collector stats.ReadWriter, rs resolvedSource) Result {
+//nolint:revive // cognitive-complexity: single-file copy path with endpoint setup
+func runFileCopy(
+	ctx context.Context,
+	cfg Config,
+	collector stats.ReadWriter,
+	rs resolvedSource,
+) Result {
 	dst := rs.dstBase
 
 	// If dst is an existing directory, copy into it.
@@ -476,8 +508,8 @@ func fileInfoToTask(srcPath, dstPath string, info os.FileInfo) (FileTask, error)
 		Type:    Regular,
 		Size:    info.Size(),
 		Mode:    uint32(info.Mode()),
-		Uid:     stat.Uid,
-		Gid:     stat.Gid,
+		UID:     stat.Uid,
+		GID:     stat.Gid,
 		ModTime: info.ModTime(),
 		AccTime: atimeFromStat(stat),
 	}

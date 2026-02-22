@@ -36,8 +36,8 @@ type ThemeConfig struct {
 	Bright *string `toml:"bright"`
 }
 
-// ConfigPath returns the resolved path to the config file.
-func ConfigPath() string {
+// Path returns the resolved path to the config file.
+func Path() string {
 	dir := os.Getenv("XDG_CONFIG_HOME")
 	if dir == "" {
 		home, err := os.UserHomeDir()
@@ -52,7 +52,7 @@ func ConfigPath() string {
 // Load reads the config file from the XDG path. Returns a zero Config
 // (no error) if the file does not exist. Config is always optional.
 func Load() (Config, error) {
-	path := ConfigPath()
+	path := Path()
 	if path == "" {
 		return Config{}, nil
 	}

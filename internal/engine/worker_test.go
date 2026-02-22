@@ -8,14 +8,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bamsammich/beam/internal/stats"
-	"github.com/bamsammich/beam/internal/transport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
+
+	"github.com/bamsammich/beam/internal/stats"
+	"github.com/bamsammich/beam/internal/transport"
 )
 
-func newTestWorkerPool(t *testing.T, dstRoot string, opts ...func(*WorkerConfig)) (*WorkerPool, *stats.Collector) {
+func newTestWorkerPool(
+	t *testing.T,
+	dstRoot string,
+	opts ...func(*WorkerConfig),
+) (*WorkerPool, *stats.Collector) {
 	t.Helper()
 	s := &stats.Collector{}
 	cfg := WorkerConfig{
@@ -55,7 +60,8 @@ func TestWorker_SingleFileCopy(t *testing.T) {
 
 	info, err := os.Stat(srcFile)
 	require.NoError(t, err)
-	stat := info.Sys().(*syscall.Stat_t)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok, "expected *syscall.Stat_t")
 
 	tasks <- FileTask{
 		SrcPath: srcFile,
@@ -63,8 +69,8 @@ func TestWorker_SingleFileCopy(t *testing.T) {
 		Type:    Regular,
 		Size:    info.Size(),
 		Mode:    uint32(info.Mode()),
-		Uid:     stat.Uid,
-		Gid:     stat.Gid,
+		UID:     stat.Uid,
+		GID:     stat.Gid,
 		ModTime: info.ModTime(),
 		AccTime: time.Now(),
 	}
@@ -103,8 +109,10 @@ func TestWorker_AtomicWrite(t *testing.T) {
 
 	wp, _ := newTestWorkerPool(t, dst)
 
-	info, _ := os.Stat(srcFile)
-	stat := info.Sys().(*syscall.Stat_t)
+	info, err := os.Stat(srcFile)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok, "expected *syscall.Stat_t")
 
 	tasks := make(chan FileTask, 1)
 	errs := make(chan error, 1)
@@ -114,8 +122,8 @@ func TestWorker_AtomicWrite(t *testing.T) {
 		Type:    Regular,
 		Size:    info.Size(),
 		Mode:    uint32(info.Mode()),
-		Uid:     stat.Uid,
-		Gid:     stat.Gid,
+		UID:     stat.Uid,
+		GID:     stat.Gid,
 		ModTime: info.ModTime(),
 		AccTime: time.Now(),
 	}
@@ -133,7 +141,8 @@ func TestWorker_AtomicWrite(t *testing.T) {
 	assert.Equal(t, data, got)
 
 	// Verify no .beam-tmp files remain.
-	entries, _ := os.ReadDir(dst)
+	entries, err := os.ReadDir(dst)
+	require.NoError(t, err)
 	for _, e := range entries {
 		assert.NotContains(t, e.Name(), ".beam-tmp")
 	}
@@ -167,8 +176,10 @@ func TestWorker_SparseFileCopy(t *testing.T) {
 	require.NoError(t, err)
 	rfd.Close()
 
-	info, _ := os.Stat(srcFile)
-	stat := info.Sys().(*syscall.Stat_t)
+	info, err := os.Stat(srcFile)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok, "expected *syscall.Stat_t")
 
 	dstFile := filepath.Join(dst, "sparse.bin")
 
@@ -181,8 +192,8 @@ func TestWorker_SparseFileCopy(t *testing.T) {
 		Type:     Regular,
 		Size:     fileSize,
 		Mode:     uint32(info.Mode()),
-		Uid:      stat.Uid,
-		Gid:      stat.Gid,
+		UID:      stat.Uid,
+		GID:      stat.Gid,
 		ModTime:  info.ModTime(),
 		AccTime:  time.Now(),
 		Segments: segments,
@@ -301,8 +312,10 @@ func TestWorker_HardlinkCreation(t *testing.T) {
 	assert.Equal(t, data, got)
 
 	// Verify they share the same inode.
-	origStat, _ := os.Stat(dstOriginal)
-	linkStat, _ := os.Stat(dstHardlink)
+	origStat, err := os.Stat(dstOriginal)
+	require.NoError(t, err)
+	linkStat, err := os.Stat(dstHardlink)
+	require.NoError(t, err)
 	assert.Equal(t,
 		origStat.Sys().(*syscall.Stat_t).Ino,
 		linkStat.Sys().(*syscall.Stat_t).Ino,
@@ -353,8 +366,10 @@ func TestWorker_MetadataPreservation(t *testing.T) {
 	accTime := time.Date(2020, 6, 15, 13, 0, 0, 0, time.UTC)
 	require.NoError(t, os.Chtimes(srcFile, accTime, modTime))
 
-	info, _ := os.Stat(srcFile)
-	stat := info.Sys().(*syscall.Stat_t)
+	info, err := os.Stat(srcFile)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok, "expected *syscall.Stat_t")
 
 	dstFile := filepath.Join(dst, "file.txt")
 
@@ -371,8 +386,8 @@ func TestWorker_MetadataPreservation(t *testing.T) {
 		Type:    Regular,
 		Size:    info.Size(),
 		Mode:    uint32(info.Mode()),
-		Uid:     stat.Uid,
-		Gid:     stat.Gid,
+		UID:     stat.Uid,
+		GID:     stat.Gid,
 		ModTime: modTime,
 		AccTime: accTime,
 	}

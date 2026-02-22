@@ -13,21 +13,21 @@ import (
 
 // VerifyConfig controls the post-copy verification pass.
 type VerifyConfig struct {
-	SrcRoot     string
-	DstRoot     string
-	Workers     int
-	Filter      *filter.Chain
 	Events      chan<- event.Event
 	Stats       stats.Writer
 	SrcEndpoint transport.ReadEndpoint
 	DstEndpoint transport.WriteEndpoint
+	Filter      *filter.Chain
+	SrcRoot     string
+	DstRoot     string
+	Workers     int
 }
 
 // VerifyResult holds the outcome of a verification pass.
 type VerifyResult struct {
+	Errors   []VerifyError
 	Verified int64
 	Failed   int64
-	Errors   []VerifyError
 }
 
 // VerifyError records a single checksum mismatch.
@@ -40,6 +40,8 @@ type VerifyError struct {
 // Verify walks the destination tree and compares BLAKE3 checksums against
 // the source for every regular file. It fans out to cfg.Workers goroutines.
 // SrcEndpoint and DstEndpoint must be set by the caller.
+//
+//nolint:revive // cognitive-complexity: hash comparison with error handling for src/dst mismatch
 func Verify(ctx context.Context, cfg VerifyConfig) VerifyResult {
 	emitEvent(cfg.Events, event.Event{Type: event.VerifyStarted})
 
@@ -58,7 +60,7 @@ func Verify(ctx context.Context, cfg VerifyConfig) VerifyResult {
 	var wg sync.WaitGroup
 
 	for range workers {
-		wg.Add(1)
+		wg.Add(1) //nolint:revive // use-waitgroup-go: WaitGroup.Go not available in Go 1.25
 		go func() {
 			defer wg.Done()
 			for relPath := range taskCh {
@@ -136,11 +138,10 @@ func Verify(ctx context.Context, cfg VerifyConfig) VerifyResult {
 	}
 
 	for _, f := range files {
-		select {
-		case <-ctx.Done():
+		if ctx.Err() != nil {
 			break
-		case taskCh <- f:
 		}
+		taskCh <- f
 	}
 	close(taskCh)
 	wg.Wait()
@@ -150,8 +151,11 @@ func Verify(ctx context.Context, cfg VerifyConfig) VerifyResult {
 
 // collectVerifyFiles walks the destination tree and returns relative paths
 // of regular files that pass the filter and also exist in the source.
+//
+//nolint:revive // cognitive-complexity: walk callback with filter + source existence check
 func collectVerifyFiles(ctx context.Context, cfg VerifyConfig) []string {
 	var files []string
+	//nolint:errcheck // walk errors are non-fatal for verification file collection
 	_ = cfg.DstEndpoint.Walk(func(entry transport.FileEntry) error {
 		select {
 		case <-ctx.Done():

@@ -9,8 +9,9 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/bamsammich/beam/internal/transport/proto"
 	"github.com/spf13/cobra"
+
+	"github.com/bamsammich/beam/internal/transport/proto"
 )
 
 var daemonCmd = &cobra.Command{
@@ -40,11 +41,11 @@ func init() {
 }
 
 func runDaemon(cmd *cobra.Command, _ []string) error {
-	listenAddr, _ := cmd.Flags().GetString("listen")
-	root, _ := cmd.Flags().GetString("root")
-	token, _ := cmd.Flags().GetString("token")
-	tlsCertFile, _ := cmd.Flags().GetString("tls-cert")
-	tlsKeyFile, _ := cmd.Flags().GetString("tls-key")
+	listenAddr, _ := cmd.Flags().GetString("listen")    //nolint:errcheck // flag name is hardcoded
+	root, _ := cmd.Flags().GetString("root")            //nolint:errcheck // flag name is hardcoded
+	token, _ := cmd.Flags().GetString("token")          //nolint:errcheck // flag name is hardcoded
+	tlsCertFile, _ := cmd.Flags().GetString("tls-cert") //nolint:errcheck // flag name is hardcoded
+	tlsKeyFile, _ := cmd.Flags().GetString("tls-key")   //nolint:errcheck // flag name is hardcoded
 
 	// Validate root exists.
 	info, err := os.Stat(root)
@@ -63,9 +64,9 @@ func runDaemon(cmd *cobra.Command, _ []string) error {
 
 	// Load TLS certificate if provided.
 	if tlsCertFile != "" && tlsKeyFile != "" {
-		cert, err := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
-		if err != nil {
-			return fmt.Errorf("load TLS certificate: %w", err)
+		cert, tlsErr := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
+		if tlsErr != nil {
+			return fmt.Errorf("load TLS certificate: %w", tlsErr)
 		}
 		cfg.TLSCert = &cert
 	}

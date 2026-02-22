@@ -1,7 +1,6 @@
 package platform
 
 import (
-	"io"
 	"os"
 	"sync"
 
@@ -18,6 +17,8 @@ var bufPool = sync.Pool{
 }
 
 // copyReadWrite copies data using pread/pwrite with a pooled buffer.
+//
+//nolint:gosec // G115: fd values are small non-negative integers from os.File.Fd()
 func copyReadWrite(params CopyFileParams) (CopyResult, error) {
 	srcFd, err := os.Open(params.SrcPath)
 	if err != nil {
@@ -25,7 +26,7 @@ func copyReadWrite(params CopyFileParams) (CopyResult, error) {
 	}
 	defer srcFd.Close()
 
-	bufp := bufPool.Get().(*[]byte)
+	bufp, _ := bufPool.Get().(*[]byte) //nolint:revive // unchecked-type-assertion: pool only stores *[]byte
 	defer bufPool.Put(bufp)
 	buf := *bufp
 
@@ -57,7 +58,10 @@ func copyReadWrite(params CopyFileParams) (CopyResult, error) {
 		for written < n {
 			w, err := unix.Pwrite(dstRawFd, buf[written:n], offset+int64(written))
 			if err != nil {
-				return CopyResult{BytesWritten: totalWritten + int64(written), Method: ReadWrite}, err
+				return CopyResult{
+					BytesWritten: totalWritten + int64(written),
+					Method:       ReadWrite,
+				}, err
 			}
 			written += w
 		}
@@ -77,13 +81,11 @@ func CopyReadWrite(params CopyFileParams) (CopyResult, error) {
 
 // preallocate attempts to pre-allocate disk space. Errors are ignored as
 // fallocate is not supported on all filesystems.
+//
+//nolint:gosec // G115: fd values are small non-negative integers
 func preallocate(fd *os.File, size int64) {
-	_ = unix.Fallocate(int(fd.Fd()), 0, 0, size)
-}
-
-// openSrc opens the source file and optionally seeks to validate offset.
-func openSrc(path string) (*os.File, error) {
-	return os.Open(path)
+	//nolint:errcheck // fallocate is advisory; not supported on all filesystems
+	unix.Fallocate(int(fd.Fd()), 0, 0, size)
 }
 
 // copyLength returns the effective byte count to copy.
@@ -106,7 +108,3 @@ func isFallbackErr(err error) bool {
 	}
 	return false
 }
-
-// ErrNotWholeCopy is a sentinel used internally to signal that an optimization
-// only supports whole-file copies.
-var errNotWholeCopy = io.ErrNoProgress

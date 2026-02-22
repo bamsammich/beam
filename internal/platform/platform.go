@@ -38,9 +38,9 @@ type CopyResult struct {
 
 // CopyFileParams describes what to copy.
 type CopyFileParams struct {
-	SrcPath   string
 	DstFd     *os.File
+	SrcPath   string
 	SrcOffset int64
-	Length    int64 // 0 means copy entire file
 	SrcSize   int64
+	Length    int64
 }

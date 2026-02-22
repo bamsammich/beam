@@ -3,7 +3,10 @@ package ui
 // Sparkline renders a slice of float64 values as Unicode block characters.
 // The output is exactly width runes wide. Values are normalized to the max
 // value in the input slice.
-func Sparkline(data []float64, width int) string {
+func Sparkline(
+	data []float64,
+	width int,
+) string { //nolint:revive // cognitive-complexity: straightforward normalization logic
 	if width <= 0 {
 		return ""
 	}

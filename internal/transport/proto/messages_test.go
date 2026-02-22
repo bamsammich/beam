@@ -5,11 +5,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bamsammich/beam/internal/transport"
-	"github.com/bamsammich/beam/internal/transport/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/tinylib/msgp/msgp" // for manual msgpack construction in TestUnknownFieldsIgnored
+
+	"github.com/bamsammich/beam/internal/transport"
+	"github.com/bamsammich/beam/internal/transport/proto"
 )
 
 func TestHandshakeRoundTrip(t *testing.T) {
@@ -73,8 +74,8 @@ func TestFileEntryConversion(t *testing.T) {
 		IsDir:      false,
 		IsSymlink:  true,
 		LinkTarget: "../other",
-		Uid:        501,
-		Gid:        20,
+		UID:        501,
+		GID:        20,
 		Nlink:      1,
 		Dev:        123,
 		Ino:        456,
@@ -91,8 +92,8 @@ func TestFileEntryConversion(t *testing.T) {
 	assert.Equal(t, entry.IsDir, roundTripped.IsDir)
 	assert.Equal(t, entry.IsSymlink, roundTripped.IsSymlink)
 	assert.Equal(t, entry.LinkTarget, roundTripped.LinkTarget)
-	assert.Equal(t, entry.Uid, roundTripped.Uid)
-	assert.Equal(t, entry.Gid, roundTripped.Gid)
+	assert.Equal(t, entry.UID, roundTripped.UID)
+	assert.Equal(t, entry.GID, roundTripped.GID)
 	assert.Equal(t, entry.Nlink, roundTripped.Nlink)
 	assert.Equal(t, entry.Dev, roundTripped.Dev)
 	assert.Equal(t, entry.Ino, roundTripped.Ino)
@@ -147,7 +148,7 @@ func TestMapEncoding(t *testing.T) {
 
 	// Parse the first byte to check it's a msgpack map (fixmap 0x80-0x8f, map16 0xde, map32 0xdf).
 	// Array encoding would be fixarray 0x90-0x9f, array16 0xdc, array32 0xdd.
-	require.True(t, len(data) > 0)
+	require.NotEmpty(t, data)
 	firstByte := data[0]
 	isMap := (firstByte >= 0x80 && firstByte <= 0x8f) || firstByte == 0xde || firstByte == 0xdf
 	assert.True(t, isMap, "expected map encoding, got first byte 0x%02x", firstByte)

@@ -5,9 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bamsammich/beam/internal/event"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bamsammich/beam/internal/event"
 )
 
 func TestFeedView_HandleFileStarted(t *testing.T) {

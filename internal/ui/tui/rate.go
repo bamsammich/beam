@@ -28,7 +28,12 @@ func (r *rateView) handleEvent(ev event.Event) {
 	}
 }
 
-func (r *rateView) view(width, height int, snap stats.Snapshot, collector stats.Reader, totalWorkers int) string {
+func (r *rateView) view(
+	width, _ int,
+	snap stats.Snapshot,
+	collector stats.Reader,
+	totalWorkers int,
+) string {
 	if width < 20 {
 		width = 20
 	}

@@ -14,11 +14,11 @@ func (p *quietPresenter) Run(events <-chan Event) error {
 	return nil
 }
 
-func (p *quietPresenter) handleEvent(_ Event) {
+func (*quietPresenter) handleEvent(_ Event) {
 	// Totals are set on the collector directly by the engine;
 	// presenters only read from the collector, never write.
 }
 
-func (p *quietPresenter) Summary() string {
+func (*quietPresenter) Summary() string {
 	return ""
 }

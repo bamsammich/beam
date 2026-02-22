@@ -466,13 +466,19 @@ Build in this sequence. Each phase is independently useful:
    - Server-side BLAKE3 hashing (NativeHash capability)
    - `BeamReadEndpoint` + `BeamWriteEndpoint` implementing transport interfaces
 
-8. **Phase 6c — Pull delta + bidirectional negotiation** (future)
-   - Pull delta over beam protocol (remote computes signatures, sends delta ops)
-   - Pull delta over SFTP (stream full remote file for client-side matching)
-   - Bidirectional delta negotiation when both ends are beam
-   - Auto-detect beam on remote: try `beam --server` over SSH, fall back to SFTP
+8. **Phase 6c — Server-side delta transfer** (complete)
+   - Three new RPCs: ComputeSignature, MatchBlocks, ApplyDelta
+   - Push-delta (local→beam): sigs computed on dst daemon, ops applied on dst daemon
+   - Pull-delta (beam→local): sigs computed locally, matching done on src daemon
+   - Beam-to-beam delta: client relays sigs/ops between daemons
+   - `DeltaTransfer` capability signaling in handshake
+   - Copy direction defines roles — no separate negotiation protocol needed
 
-9. **Phase 7 — Polish**
+9. **Phase 6d — SSH beam auto-detection** (future)
+   - Auto-detect beam on remote: try `beam --server` over SSH, fall back to SFTP
+   - SSH subsystem or remote shell execution for beam protocol bootstrapping
+
+10. **Phase 7 — Polish**
    - `--benchmark` mode
    - `--bwlimit` rate limiting (token bucket)
    - Structured JSON logging
@@ -523,11 +529,9 @@ Before implementing, familiarize yourself with:
 - **Phase 4** — BLAKE3 post-copy verification, mtime-based skip detection (PR #3)
 - **Phase 5** — TUI overhaul, config system, worker throttle, multi-source support (PR #4, #5)
 - **Phase 6a** — Transport abstraction, SFTP endpoints, SSH auth, push-only delta transfer (PR #6)
-- **Phase 6b** — Custom binary protocol with standalone TCP daemon, `beam://` URL scheme, msgpack wire format, TLS+bearer auth, stream multiplexer, server-side hashing
+- **Phase 6b** — Custom binary protocol with standalone TCP daemon, `beam://` URL scheme, msgpack wire format, TLS+bearer auth, stream multiplexer, server-side hashing (PR #7)
+- **Phase 6c** — Server-side delta transfer: ComputeSignature/MatchBlocks/ApplyDelta RPCs, push-delta, pull-delta, beam-to-beam delta, DeltaTransfer capability flag
 
 ### Next Up
-- **Phase 6c** — Pull delta + bidirectional negotiation
-  - Pull delta over beam protocol (remote computes signatures, sends delta ops)
-  - Pull delta over SFTP (stream full remote file for client-side matching — slower but works without beam on remote)
-  - Bidirectional delta negotiation when both ends are beam
+- **Phase 6d** — SSH beam auto-detection
   - Auto-detect beam on remote: try `beam --server` over SSH, fall back to SFTP

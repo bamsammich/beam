@@ -6,7 +6,7 @@ import "time"
 type Type int
 
 const (
-	ScanStarted     Type = iota + 1
+	ScanStarted Type = iota + 1
 	ScanComplete
 	FileStarted
 	FileProgress
@@ -46,12 +46,12 @@ func (t Type) String() string {
 
 // Event represents a single progress event from the engine.
 type Event struct {
-	Type      Type
+	Error     error
 	Timestamp time.Time
 	Path      string // relative path
 	Size      int64  // file size or bytes-so-far
 	Total     int64  // total files (ScanComplete)
 	TotalSize int64  // total bytes (ScanComplete)
-	Error     error
+	Type      Type
 	WorkerID  int
 }

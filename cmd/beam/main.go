@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -10,6 +11,9 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+
+	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/bamsammich/beam/internal/config"
 	"github.com/bamsammich/beam/internal/engine"
@@ -21,8 +25,6 @@ import (
 	"github.com/bamsammich/beam/internal/transport/proto"
 	"github.com/bamsammich/beam/internal/ui"
 	"github.com/bamsammich/beam/internal/ui/tui"
-	"github.com/spf13/cobra"
-	"github.com/spf13/pflag"
 )
 
 var version = "dev"
@@ -38,8 +40,8 @@ type filterFlag struct {
 	include bool
 }
 
-func (f *filterFlag) String() string { return "" }
-func (f *filterFlag) Type() string   { return "string" }
+func (*filterFlag) String() string { return "" }
+func (*filterFlag) Type() string   { return "string" }
 
 func (f *filterFlag) Set(val string) error {
 	if f.include {
@@ -48,6 +50,7 @@ func (f *filterFlag) Set(val string) error {
 	return f.chain.AddExclude(val)
 }
 
+//nolint:gocyclo,revive // cyclomatic,cognitive-complexity: main CLI entry point orchestrates all flag parsing and mode selection
 func run() int {
 	var (
 		recursive      bool
@@ -114,10 +117,12 @@ func run() int {
 				}
 			}
 			if srcRemote && dstLoc.IsRemote() {
-				return fmt.Errorf("remote-to-remote transfers are not supported; one side must be local")
+				return errors.New(
+					"remote-to-remote transfers are not supported; one side must be local",
+				)
 			}
 			if srcRemote && len(srcLocs) > 1 {
-				return fmt.Errorf("multiple remote sources are not supported")
+				return errors.New("multiple remote sources are not supported")
 			}
 
 			// Build local path lists (engine.Config.Sources and .Dst use local paths).
@@ -255,7 +260,8 @@ func run() int {
 
 			// Create worker throttle.
 			workerLimit := &atomic.Int32{}
-			workerLimit.Store(int32(workers))
+			wk := int32(workers) //nolint:gosec // G115: workers bounded by min(NumCPU*2, 32)
+			workerLimit.Store(wk)
 
 			// Format source display string for presenters.
 			srcDisplay := rawSources[0]
@@ -348,7 +354,7 @@ func run() int {
 				}()
 
 				// TUI runs in foreground — blocks until user quits.
-				_ = presenter.Run(events)
+				_ = presenter.Run(events) //nolint:errcheck // presenter error is non-fatal
 
 				// User quit the TUI — cancel engine if still running.
 				engineCancel()
@@ -356,17 +362,21 @@ func run() int {
 				stop()
 			} else {
 				// Inline mode: run presenter in background, engine in foreground.
+				var presenterErr error
 				var presenterWg sync.WaitGroup
 				presenterWg.Add(1)
 				go func() {
 					defer presenterWg.Done()
-					_ = presenter.Run(events)
+					presenterErr = presenter.Run(events)
 				}()
 
 				result = engine.Run(ctx, engineCfg)
 				stop()
 				close(events)
 				presenterWg.Wait()
+				if presenterErr != nil {
+					fmt.Fprintf(os.Stderr, "presenter: %v\n", presenterErr)
+				}
 			}
 
 			if !quiet {
@@ -392,39 +402,58 @@ func run() int {
 	rootCmd.Flags().BoolVar(&showVersion, "version", false, "print version and exit")
 
 	rootCmd.Flags().BoolVarP(&recursive, "recursive", "r", false, "copy directories recursively")
-	rootCmd.Flags().BoolVarP(&archive, "archive", "a", false, "archive mode (recursive + preserve all)")
-	rootCmd.Flags().IntVarP(&workers, "workers", "n", 0, "number of copy workers (default: min(NumCPU*2, 32))")
-	rootCmd.Flags().Int64Var(&chunkThreshold, "chunk-threshold", 256*1024*1024, "split files larger than this into chunks (bytes)")
+	rootCmd.Flags().
+		BoolVarP(&archive, "archive", "a", false, "archive mode (recursive + preserve all)")
+	rootCmd.Flags().
+		IntVarP(&workers, "workers", "n", 0, "number of copy workers (default: min(NumCPU*2, 32))")
+	rootCmd.Flags().
+		Int64Var(&chunkThreshold, "chunk-threshold", 256*1024*1024, "split files larger than this into chunks (bytes)")
 	rootCmd.Flags().BoolVarP(&verbose, "verbose", "v", false, "verbose output")
 	rootCmd.Flags().BoolVarP(&quiet, "quiet", "q", false, "suppress all output except errors")
 	rootCmd.Flags().BoolVar(&dryRun, "dry-run", false, "show what would be copied without writing")
-	rootCmd.Flags().BoolVar(&useIOURing, "iouring", false, "use io_uring for file copy (Linux only)")
+	rootCmd.Flags().
+		BoolVar(&useIOURing, "iouring", false, "use io_uring for file copy (Linux only)")
 	rootCmd.Flags().BoolVar(&forceFeed, "feed", false, "force feed mode (one line per file)")
 	rootCmd.Flags().BoolVar(&forceRate, "rate", false, "force rate mode (sparkline + throughput)")
 	rootCmd.Flags().BoolVar(&noProgress, "no-progress", false, "disable progress display")
-	rootCmd.Flags().BoolVar(&tuiFlag, "tui", false, "full-screen TUI (Bubble Tea) for large transfers")
+	rootCmd.Flags().
+		BoolVar(&tuiFlag, "tui", false, "full-screen TUI (Bubble Tea) for large transfers")
 
 	// Filter flags — use custom pflag.Value to preserve CLI ordering.
-	rootCmd.Flags().VarP(&filterFlag{chain: chain, include: false}, "exclude", "", "exclude files matching PATTERN (repeatable)")
-	rootCmd.Flags().VarP(&filterFlag{chain: chain, include: true}, "include", "", "include files matching PATTERN (repeatable)")
+	rootCmd.Flags().
+		VarP(&filterFlag{chain: chain, include: false}, "exclude", "", "exclude files matching PATTERN (repeatable)")
+	rootCmd.Flags().
+		VarP(&filterFlag{chain: chain, include: true}, "include", "", "include files matching PATTERN (repeatable)")
 	rootCmd.Flags().StringVar(&filterFile, "filter", "", "read filter rules from FILE")
-	rootCmd.Flags().BoolVar(&deleteFlag, "delete", false, "delete extraneous files from destination")
+	rootCmd.Flags().
+		BoolVar(&deleteFlag, "delete", false, "delete extraneous files from destination")
 	rootCmd.Flags().BoolVar(&verifyFlag, "verify", false, "verify checksums after copy (BLAKE3)")
-	rootCmd.Flags().BoolVar(&noTimes, "no-times", false, "don't preserve mtime (disables skip detection on re-runs)")
-	rootCmd.Flags().StringVar(&minSizeStr, "min-size", "", "skip files smaller than SIZE (e.g. 1M, 100K)")
-	rootCmd.Flags().StringVar(&maxSizeStr, "max-size", "", "skip files larger than SIZE (e.g. 1G, 500M)")
-	rootCmd.Flags().StringVar(&sshKeyFile, "ssh-key", "", "SSH private key file (default: auto-detect)")
+	rootCmd.Flags().
+		BoolVar(&noTimes, "no-times", false, "don't preserve mtime (disables skip detection on re-runs)")
+	rootCmd.Flags().
+		StringVar(&minSizeStr, "min-size", "", "skip files smaller than SIZE (e.g. 1M, 100K)")
+	rootCmd.Flags().
+		StringVar(&maxSizeStr, "max-size", "", "skip files larger than SIZE (e.g. 1G, 500M)")
+	rootCmd.Flags().
+		StringVar(&sshKeyFile, "ssh-key", "", "SSH private key file (default: auto-detect)")
 	rootCmd.Flags().IntVar(&sshPort, "ssh-port", 22, "SSH port")
 	rootCmd.Flags().BoolVar(&deltaFlag, "delta", true, "use delta transfer for remote copies")
 	rootCmd.Flags().BoolVar(&noDelta, "no-delta", false, "disable delta transfer")
-	rootCmd.Flags().StringVar(&beamToken, "beam-token", "", "authentication token for beam:// connections")
+	rootCmd.Flags().
+		StringVar(&beamToken, "beam-token", "", "authentication token for beam:// connections")
 
 	// Register daemon subcommand.
 	rootCmd.AddCommand(daemonCmd)
 
 	// Mark --exclude and --include as allowing repeated use.
-	rootCmd.Flags().SetAnnotation("exclude", "cobra_annotation_one_required", nil)
-	rootCmd.Flags().SetAnnotation("include", "cobra_annotation_one_required", nil)
+	if err := rootCmd.Flags().
+		SetAnnotation("exclude", "cobra_annotation_one_required", nil); err != nil {
+		panic(fmt.Sprintf("set flag annotation: %v", err))
+	}
+	if err := rootCmd.Flags().
+		SetAnnotation("include", "cobra_annotation_one_required", nil); err != nil {
+		panic(fmt.Sprintf("set flag annotation: %v", err))
+	}
 	rootCmd.Flags().VisitAll(func(f *pflag.Flag) {
 		if f.Name == "exclude" || f.Name == "include" {
 			f.NoOptDefVal = ""
@@ -443,7 +472,14 @@ func run() int {
 }
 
 // applyConfigDefaults applies config file defaults for flags not explicitly set on the CLI.
-func applyConfigDefaults(cmd *cobra.Command, defaults config.DefaultsConfig, verify *bool, workers *int, tuiFlag *bool, archive *bool) {
+func applyConfigDefaults(
+	cmd *cobra.Command,
+	defaults config.DefaultsConfig,
+	verify *bool,
+	workers *int,
+	tuiFlag *bool,
+	archive *bool,
+) {
 	if !cmd.Flags().Changed("verify") && defaults.Verify != nil {
 		*verify = *defaults.Verify
 	}
@@ -466,14 +502,16 @@ func (e *exitError) Error() string {
 	return fmt.Sprintf("exit code %d", e.code)
 }
 
-// dialBeamRead connects to a beam daemon and returns a BeamReadEndpoint.
-func dialBeamRead(loc transport.Location, flagToken string) (*beam.BeamReadEndpoint, error) {
+// dialBeamRead connects to a beam daemon and returns a ReadEndpoint.
+func dialBeamRead(loc transport.Location, flagToken string) (*beam.ReadEndpoint, error) {
 	token := flagToken
 	if token == "" {
 		token = loc.Token
 	}
 	if token == "" {
-		return nil, fmt.Errorf("beam:// requires an authentication token (use --beam-token or beam://token@host/path)")
+		return nil, errors.New(
+			"beam:// requires an authentication token (use --beam-token or beam://token@host/path)",
+		)
 	}
 
 	addr := beamAddr(loc)
@@ -483,17 +521,19 @@ func dialBeamRead(loc transport.Location, flagToken string) (*beam.BeamReadEndpo
 	}
 
 	_ = root // root is informational; path comes from loc
-	return beam.NewBeamReadEndpoint(mux, loc.Path, caps), nil
+	return beam.NewReadEndpoint(mux, loc.Path, caps), nil
 }
 
-// dialBeamWrite connects to a beam daemon and returns a BeamWriteEndpoint.
-func dialBeamWrite(loc transport.Location, flagToken string) (*beam.BeamWriteEndpoint, error) {
+// dialBeamWrite connects to a beam daemon and returns a WriteEndpoint.
+func dialBeamWrite(loc transport.Location, flagToken string) (*beam.WriteEndpoint, error) {
 	token := flagToken
 	if token == "" {
 		token = loc.Token
 	}
 	if token == "" {
-		return nil, fmt.Errorf("beam:// requires an authentication token (use --beam-token or beam://token@host/path)")
+		return nil, errors.New(
+			"beam:// requires an authentication token (use --beam-token or beam://token@host/path)",
+		)
 	}
 
 	addr := beamAddr(loc)
@@ -503,7 +543,7 @@ func dialBeamWrite(loc transport.Location, flagToken string) (*beam.BeamWriteEnd
 	}
 
 	_ = root
-	return beam.NewBeamWriteEndpoint(mux, loc.Path, caps), nil
+	return beam.NewWriteEndpoint(mux, loc.Path, caps), nil
 }
 
 func beamAddr(loc transport.Location) string {

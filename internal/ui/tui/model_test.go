@@ -8,11 +8,11 @@ import (
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/stats"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func newTestModel() (Model, *stats.Collector) {
@@ -40,7 +40,8 @@ func TestModel_Init(t *testing.T) {
 func TestModel_KeyQ_Quits(t *testing.T) {
 	m, _ := newTestModel()
 	updated, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'q'}})
-	model := updated.(Model)
+	model, ok := updated.(Model)
+	require.True(t, ok)
 	assert.True(t, model.quitting)
 	assert.NotNil(t, cmd) // tea.Quit
 }
@@ -48,7 +49,8 @@ func TestModel_KeyQ_Quits(t *testing.T) {
 func TestModel_KeyR_SwitchesToRate(t *testing.T) {
 	m, _ := newTestModel()
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'r'}})
-	model := updated.(Model)
+	model, ok := updated.(Model)
+	require.True(t, ok)
 	assert.Equal(t, viewRate, model.mode)
 }
 
@@ -56,7 +58,8 @@ func TestModel_KeyF_SwitchesToFeed(t *testing.T) {
 	m, _ := newTestModel()
 	m.mode = viewRate
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
-	model := updated.(Model)
+	model, ok := updated.(Model)
+	require.True(t, ok)
 	assert.Equal(t, viewFeed, model.mode)
 }
 
@@ -64,21 +67,24 @@ func TestModel_KeyE_SwitchesToFeed(t *testing.T) {
 	m, _ := newTestModel()
 	m.mode = viewRate
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'e'}})
-	model := updated.(Model)
+	model, ok := updated.(Model)
+	require.True(t, ok)
 	assert.Equal(t, viewFeed, model.mode)
 }
 
 func TestModel_KeyP_ShowsNotImplemented(t *testing.T) {
 	m, _ := newTestModel()
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'p'}})
-	model := updated.(Model)
+	model, ok := updated.(Model)
+	require.True(t, ok)
 	assert.Contains(t, model.statusMsg, "not yet implemented")
 }
 
 func TestModel_WindowResize(t *testing.T) {
 	m, _ := newTestModel()
 	updated, _ := m.Update(tea.WindowSizeMsg{Width: 120, Height: 40})
-	model := updated.(Model)
+	model, ok := updated.(Model)
+	require.True(t, ok)
 	assert.Equal(t, 120, model.width)
 	assert.Equal(t, 40, model.height)
 }
@@ -92,7 +98,8 @@ func TestModel_EngineEvent(t *testing.T) {
 		WorkerID: 0,
 	})
 	updated, cmd := m.Update(ev)
-	model := updated.(Model)
+	model, ok := updated.(Model)
+	require.True(t, ok)
 
 	require.Len(t, model.feed.inFlight, 1)
 	assert.True(t, model.rate.busyWorkers[0])
@@ -102,7 +109,8 @@ func TestModel_EngineEvent(t *testing.T) {
 func TestModel_ChannelDone_StaysOpen(t *testing.T) {
 	m, _ := newTestModel()
 	updated, cmd := m.Update(channelDoneMsg{})
-	model := updated.(Model)
+	model, ok := updated.(Model)
+	require.True(t, ok)
 	assert.True(t, model.done)
 	assert.False(t, model.quitting)
 	assert.NotNil(t, cmd) // tickCmd keeps TUI alive
@@ -114,7 +122,8 @@ func TestModel_Tick(t *testing.T) {
 	c.AddBytesCopied(1024 * 1024)
 
 	updated, cmd := m.Update(tickMsg(time.Now()))
-	model := updated.(Model)
+	model, ok := updated.(Model)
+	require.True(t, ok)
 	assert.Equal(t, int64(5), model.lastSnap.FilesCopied)
 	assert.NotNil(t, cmd)
 }
@@ -162,17 +171,20 @@ func TestModel_ScrollKeys(t *testing.T) {
 
 	// j scrolls down.
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'j'}})
-	model := updated.(Model)
+	model, ok := updated.(Model)
+	require.True(t, ok)
 	assert.False(t, model.feed.autoScroll)
 
 	// G re-enables autoScroll.
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'G'}})
-	model = updated.(Model)
+	model, ok = updated.(Model)
+	require.True(t, ok)
 	assert.True(t, model.feed.autoScroll)
 
 	// g goes to top.
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
-	model = updated.(Model)
+	model, ok = updated.(Model)
+	require.True(t, ok)
 	assert.Equal(t, 0, model.feed.scrollOffset)
 	assert.False(t, model.feed.autoScroll)
 }
@@ -183,13 +195,15 @@ func TestModel_SaveModal_ActivatesOnlyWhenDone(t *testing.T) {
 
 	// s should do nothing when not done.
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
-	model := updated.(Model)
+	model, ok := updated.(Model)
+	require.True(t, ok)
 	assert.False(t, model.save.active)
 
 	// s should activate when done.
 	model.done = true
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'s'}})
-	model = updated.(Model)
+	model, ok = updated.(Model)
+	require.True(t, ok)
 	assert.True(t, model.save.active)
 	assert.Contains(t, model.save.input, "beam-")
 	assert.Contains(t, model.save.input, ".log")
@@ -202,7 +216,8 @@ func TestModel_SaveModal_EscCancels(t *testing.T) {
 	m.save.input = "test.log"
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyEscape})
-	model := updated.(Model)
+	model, ok := updated.(Model)
+	require.True(t, ok)
 	assert.False(t, model.save.active)
 }
 
@@ -214,18 +229,22 @@ func TestModel_SaveModal_TextInput(t *testing.T) {
 
 	// Type "abc".
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
-	model := updated.(Model)
+	model, ok := updated.(Model)
+	require.True(t, ok)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'b'}})
-	model = updated.(Model)
+	model, ok = updated.(Model)
+	require.True(t, ok)
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
-	model = updated.(Model)
+	model, ok = updated.(Model)
+	require.True(t, ok)
 
 	assert.Equal(t, "abc", model.save.input)
 	assert.Equal(t, 3, model.save.cursor)
 
 	// Backspace.
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyBackspace})
-	model = updated.(Model)
+	model, ok = updated.(Model)
+	require.True(t, ok)
 	assert.Equal(t, "ab", model.save.input)
 }
 
@@ -251,7 +270,7 @@ func TestModel_SaveModal_WritesFile(t *testing.T) {
 	msg := cmd()
 	result, ok := msg.(saveResultMsg)
 	require.True(t, ok)
-	assert.NoError(t, result.err)
+	require.NoError(t, result.err)
 
 	content, err := os.ReadFile(path)
 	require.NoError(t, err)
@@ -278,21 +297,24 @@ func TestModel_WorkerAdjust_WithThrottle(t *testing.T) {
 
 	// Increment.
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'+'}})
-	model := updated.(Model)
+	model, ok := updated.(Model)
+	require.True(t, ok)
 	assert.Contains(t, model.statusMsg, "workers")
 	// Already at max (8), so should stay at 8.
 	assert.Equal(t, int32(8), model.workerLimit.Load())
 
 	// Decrement.
 	updated, _ = model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'-'}})
-	model = updated.(Model)
+	model, ok = updated.(Model)
+	require.True(t, ok)
 	assert.Equal(t, int32(7), model.workerLimit.Load())
 }
 
 func TestModel_WorkerAdjust_WithoutThrottle(t *testing.T) {
 	m, _ := newTestModel() // no throttle
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'+'}})
-	model := updated.(Model)
+	model, ok := updated.(Model)
+	require.True(t, ok)
 	assert.Contains(t, model.statusMsg, "not available")
 }
 
@@ -301,6 +323,7 @@ func TestModel_WorkerAdjust_ClampsToMin(t *testing.T) {
 	m.workerLimit.Store(1)
 
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'-'}})
-	model := updated.(Model)
+	model, ok := updated.(Model)
+	require.True(t, ok)
 	assert.Equal(t, int32(1), model.workerLimit.Load())
 }

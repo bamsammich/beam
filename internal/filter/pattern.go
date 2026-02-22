@@ -8,9 +8,9 @@ import (
 // compiledPattern is a compiled glob pattern that can match paths.
 type compiledPattern struct {
 	re       *regexp.Regexp
+	original string
 	anchored bool // pattern starts with /
 	dirOnly  bool // pattern ends with /
-	original string
 }
 
 // compilePattern converts a rsync-style glob pattern into a compiled matcher.
@@ -60,6 +60,8 @@ func (cp *compiledPattern) match(relPath string, isDir bool) bool {
 }
 
 // globToRegex converts a glob pattern to a regex string.
+//
+//nolint:gocyclo,revive // cognitive-complexity: character-by-character glob parser
 func globToRegex(pattern string) string {
 	var b strings.Builder
 	i := 0

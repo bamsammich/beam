@@ -7,10 +7,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bamsammich/beam/internal/filter"
-	"github.com/bamsammich/beam/internal/transport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bamsammich/beam/internal/filter"
+	"github.com/bamsammich/beam/internal/transport"
 )
 
 func TestScanner_FlatDir(t *testing.T) {
@@ -61,6 +62,7 @@ func TestScanner_FlatDir(t *testing.T) {
 	assert.Equal(t, 2, fileCount)
 }
 
+//nolint:revive // cognitive-complexity: test function with table-driven subtests
 func TestScanner_NestedDirs(t *testing.T) {
 	dir := t.TempDir()
 	src := filepath.Join(dir, "src")
@@ -69,7 +71,10 @@ func TestScanner_NestedDirs(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(src, "sub1", "sub2"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(src, "root.txt"), []byte("root"), 0644))
 	require.NoError(t, os.WriteFile(filepath.Join(src, "sub1", "s1.txt"), []byte("s1"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(src, "sub1", "sub2", "s2.txt"), []byte("s2"), 0644))
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(src, "sub1", "sub2", "s2.txt"), []byte("s2"), 0644),
+	)
 
 	cfg := ScannerConfig{
 		SrcRoot:     src,
@@ -117,12 +122,19 @@ func TestScanner_NestedDirs(t *testing.T) {
 	// Verify directory ordering: directories should appear before their contents.
 	dirsSeen := make(map[string]bool)
 	for _, task := range taskList {
-		if task.Type == Dir {
+		switch task.Type {
+		case Dir:
 			dirsSeen[task.SrcPath] = true
-		} else if task.Type == Regular {
+		case Regular:
 			parent := filepath.Dir(task.SrcPath)
 			if parent != src {
-				assert.True(t, dirsSeen[parent], "parent dir %s should be emitted before file %s", parent, task.SrcPath)
+				assert.True(
+					t,
+					dirsSeen[parent],
+					"parent dir %s should be emitted before file %s",
+					parent,
+					task.SrcPath,
+				)
 			}
 		}
 	}
@@ -220,9 +232,10 @@ func TestScanner_Hardlink(t *testing.T) {
 	regularCount := 0
 	hardlinkCount := 0
 	for _, task := range taskList {
-		if task.Type == Regular {
+		switch task.Type {
+		case Regular:
 			regularCount++
-		} else if task.Type == Hardlink {
+		case Hardlink:
 			hardlinkCount++
 		}
 	}
@@ -337,7 +350,10 @@ func TestScanner_ContextCancel(t *testing.T) {
 
 	require.NoError(t, os.Mkdir(src, 0755))
 	for i := range 100 {
-		require.NoError(t, os.WriteFile(filepath.Join(src, fmt.Sprintf("file%d", i)), []byte("data"), 0644))
+		require.NoError(
+			t,
+			os.WriteFile(filepath.Join(src, fmt.Sprintf("file%d", i)), []byte("data"), 0644),
+		)
 	}
 
 	cfg := ScannerConfig{
@@ -380,7 +396,7 @@ func TestScanner_PermissionDenied(t *testing.T) {
 	require.NoError(t, os.Mkdir(src, 0755))
 	subdir := filepath.Join(src, "forbidden")
 	require.NoError(t, os.Mkdir(subdir, 0000))
-	defer os.Chmod(subdir, 0755) // cleanup
+	defer func() { _ = os.Chmod(subdir, 0755) }() //nolint:errcheck // best-effort cleanup in test
 
 	cfg := ScannerConfig{
 		SrcRoot:     src,
@@ -410,7 +426,7 @@ func TestScanner_PermissionDenied(t *testing.T) {
 	<-done
 
 	// Should get an error for the forbidden directory.
-	assert.Greater(t, len(errList), 0)
+	assert.NotEmpty(t, errList)
 }
 
 func TestScanner_ExcludeFilter(t *testing.T) {
@@ -446,7 +462,7 @@ func TestScanner_ExcludeFilter(t *testing.T) {
 		}
 		close(done)
 	}()
-	for range errs {
+	for range errs { //nolint:revive // empty-block: intentionally draining error channel
 	}
 	<-done
 
@@ -462,8 +478,14 @@ func TestScanner_DirExcludeSkipsRecursion(t *testing.T) {
 
 	require.NoError(t, os.MkdirAll(filepath.Join(src, "build", "out"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(src, "root.txt"), []byte("root"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(src, "build", "artifact.bin"), []byte("bin"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(src, "build", "out", "deep.txt"), []byte("deep"), 0644))
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(src, "build", "artifact.bin"), []byte("bin"), 0644),
+	)
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(src, "build", "out", "deep.txt"), []byte("deep"), 0644),
+	)
 
 	chain := filter.NewChain()
 	require.NoError(t, chain.AddExclude("build/"))
@@ -488,7 +510,7 @@ func TestScanner_DirExcludeSkipsRecursion(t *testing.T) {
 		}
 		close(done)
 	}()
-	for range errs {
+	for range errs { //nolint:revive // empty-block: intentionally draining error channel
 	}
 	<-done
 
@@ -531,7 +553,7 @@ func TestScanner_IncludeOverride(t *testing.T) {
 		}
 		close(done)
 	}()
-	for range errs {
+	for range errs { //nolint:revive // empty-block: intentionally draining error channel
 	}
 	<-done
 

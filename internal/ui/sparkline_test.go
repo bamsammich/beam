@@ -35,13 +35,13 @@ func TestSparklineAllSame(t *testing.T) {
 	result := Sparkline(data, 4)
 	// When all values are the same, they all map to max (█).
 	runes := []rune(result)
-	for _, r := range runes {
+	for _, r := range string(runes) {
 		assert.Equal(t, '█', r)
 	}
 }
 
 func TestSparklineZeroWidth(t *testing.T) {
-	assert.Equal(t, "", Sparkline([]float64{1, 2, 3}, 0))
+	assert.Empty(t, Sparkline([]float64{1, 2, 3}, 0))
 }
 
 func TestSparklineTruncation(t *testing.T) {

@@ -2,8 +2,8 @@ package filter
 
 // Rule represents a single include or exclude filter rule.
 type Rule struct {
-	Pattern  *compiledPattern
-	Include  bool // true=include, false=exclude
+	Pattern *compiledPattern
+	Include bool // true=include, false=exclude
 }
 
 // Chain holds an ordered list of filter rules plus size filters.

@@ -15,23 +15,20 @@ import (
 
 // DaemonConfig configures a beam protocol daemon.
 type DaemonConfig struct {
-	ListenAddr string // e.g. ":7223"
-	Root       string // directory to serve
-	AuthToken  string // required bearer token
-
-	// TLS certificate. If nil, a self-signed cert is generated.
-	TLSCert *tls.Certificate
+	TLSCert    *tls.Certificate
+	ListenAddr string
+	Root       string
+	AuthToken  string //nolint:gosec // G117: field name is descriptive, not a credential leak
 }
 
 // Daemon serves the beam protocol over TLS.
 type Daemon struct {
-	cfg      DaemonConfig
 	listener net.Listener
 	readEP   *transport.LocalReadEndpoint
 	writeEP  *transport.LocalWriteEndpoint
-
-	mu    sync.Mutex
-	conns map[net.Conn]struct{}
+	conns    map[net.Conn]struct{}
+	cfg      DaemonConfig
+	mu       sync.Mutex
 }
 
 // NewDaemon creates a new beam daemon. Call Serve to start accepting connections.
@@ -114,16 +111,14 @@ func (d *Daemon) Serve(ctx context.Context) error {
 		d.conns[conn] = struct{}{}
 		d.mu.Unlock()
 
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() {
 				d.mu.Lock()
 				delete(d.conns, conn)
 				d.mu.Unlock()
 			}()
 			d.handleConn(ctx, conn)
-		}()
+		})
 	}
 
 	wg.Wait()
@@ -157,7 +152,7 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	muxWg.Add(1)
 	go func() {
 		defer muxWg.Done()
-		mux.Run()
+		mux.Run() //nolint:errcheck // mux.Run error propagated via mux closure and conn.Close
 	}()
 
 	// Wait for handshake on control stream.
@@ -205,8 +200,10 @@ func (d *Daemon) handleHandshake(mux *Mux, ch <-chan Frame) bool {
 	// Validate auth token.
 	if req.AuthToken != d.cfg.AuthToken {
 		resp := ErrorResp{Message: "authentication failed"}
-		payload, _ := resp.MarshalMsg(nil)
-		mux.Send(Frame{StreamID: ControlStream, MsgType: MsgErrorResp, Payload: payload}) //nolint:errcheck // best-effort error response
+		payload, _ := resp.MarshalMsg(nil) //nolint:errcheck // best-effort error response
+		_ = mux.Send(                      //nolint:errcheck // best-effort error response
+			Frame{StreamID: ControlStream, MsgType: MsgErrorResp, Payload: payload},
+		)
 		return false
 	}
 
@@ -219,7 +216,9 @@ func (d *Daemon) handleHandshake(mux *Mux, ch <-chan Frame) bool {
 	if err != nil {
 		return false
 	}
-	if err := mux.Send(Frame{StreamID: ControlStream, MsgType: MsgHandshakeResp, Payload: payload}); err != nil {
+	if err := mux.Send(
+		Frame{StreamID: ControlStream, MsgType: MsgHandshakeResp, Payload: payload},
+	); err != nil {
 		return false
 	}
 

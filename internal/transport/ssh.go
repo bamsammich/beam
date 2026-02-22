@@ -1,6 +1,7 @@
 package transport
 
 import (
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -15,9 +16,9 @@ import (
 
 // SSHOpts configures SSH connection behavior.
 type SSHOpts struct {
-	Port     int    // 0 = default (22)
-	KeyFile  string // override key file path; empty = try defaults
-	Password string // for non-interactive; empty = skip password auth
+	KeyFile  string
+	Password string //nolint:gosec // G117: field name is descriptive, not a credential leak
+	Port     int
 }
 
 // DialSSH establishes an SSH connection to host as user.
@@ -42,7 +43,9 @@ func DialSSH(host, userName string, opts SSHOpts) (*ssh.Client, error) {
 
 	authMethods := buildAuthMethods(opts)
 	if len(authMethods) == 0 {
-		return nil, fmt.Errorf("no SSH auth methods available (set SSH_AUTH_SOCK, provide a key, or password)")
+		return nil, errors.New(
+			"no SSH auth methods available (set SSH_AUTH_SOCK, provide a key, or password)",
+		)
 	}
 
 	hostKeyCallback, err := defaultHostKeyCallback()
@@ -73,6 +76,7 @@ func buildAuthMethods(opts SSHOpts) []ssh.AuthMethod {
 
 	// 1. SSH agent.
 	if sock := os.Getenv("SSH_AUTH_SOCK"); sock != "" {
+		//nolint:gosec // G704: socket path from SSH_AUTH_SOCK, not user-controlled URL
 		conn, err := net.Dial("unix", sock)
 		if err == nil {
 			agentClient := agent.NewClient(conn)
@@ -106,6 +110,7 @@ func buildAuthMethods(opts SSHOpts) []ssh.AuthMethod {
 	return methods
 }
 
+//nolint:ireturn // returns ssh.AuthMethod by design
 func keyFileAuth(path string) ssh.AuthMethod {
 	data, err := os.ReadFile(path)
 	if err != nil {

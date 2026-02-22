@@ -10,15 +10,15 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bamsammich/beam/internal/engine"
-	"github.com/bamsammich/beam/internal/transport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/testcontainers/testcontainers-go"
 	"github.com/testcontainers/testcontainers-go/wait"
 	"golang.org/x/crypto/ssh"
-)
 
+	"github.com/bamsammich/beam/internal/engine"
+	"github.com/bamsammich/beam/internal/transport"
+)
 
 // startSFTPContainer starts an atmoz/sftp container with the given directory
 // bind-mounted at /home/testuser/data. Returns host and port for SSH.

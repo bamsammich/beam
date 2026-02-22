@@ -6,9 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bamsammich/beam/internal/transport/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bamsammich/beam/internal/transport/proto"
 )
 
 func TestMuxSingleStream(t *testing.T) {
@@ -21,15 +22,12 @@ func TestMuxSingleStream(t *testing.T) {
 
 	// Start both muxes in background.
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		clientMux.Run()
-	}()
-	go func() {
-		defer wg.Done()
-		serverMux.Run()
-	}()
+	wg.Go(func() {
+		clientMux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
+	})
+	wg.Go(func() {
+		serverMux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
+	})
 
 	// Open stream on both sides.
 	clientCh := clientMux.OpenStream(1)
@@ -86,15 +84,12 @@ func TestMuxMultipleStreams(t *testing.T) {
 	serverMux := proto.NewMux(serverConn)
 
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		clientMux.Run()
-	}()
-	go func() {
-		defer wg.Done()
-		serverMux.Run()
-	}()
+	wg.Go(func() {
+		clientMux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
+	})
+	wg.Go(func() {
+		serverMux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
+	})
 
 	// Open multiple streams on server side.
 	ch1 := serverMux.OpenStream(1)
@@ -109,6 +104,7 @@ func TestMuxMultipleStreams(t *testing.T) {
 		go func() {
 			defer sendWg.Done()
 			for i := range numMessages {
+				//nolint:errcheck // test: concurrent send, error not critical
 				_ = clientMux.Send(proto.Frame{
 					StreamID: streamID,
 					MsgType:  proto.MsgStatReq,
@@ -170,15 +166,12 @@ func TestMuxUnknownStreamDiscarded(t *testing.T) {
 	serverMux := proto.NewMux(serverConn)
 
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		clientMux.Run()
-	}()
-	go func() {
-		defer wg.Done()
-		serverMux.Run()
-	}()
+	wg.Go(func() {
+		clientMux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
+	})
+	wg.Go(func() {
+		serverMux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
+	})
 
 	// Only register stream 1 on server.
 	ch1 := serverMux.OpenStream(1)
@@ -219,15 +212,12 @@ func TestMuxSendAfterClose(t *testing.T) {
 	serverMux := proto.NewMux(serverConn)
 
 	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		clientMux.Run()
-	}()
-	go func() {
-		defer wg.Done()
-		serverMux.Run()
-	}()
+	wg.Go(func() {
+		clientMux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
+	})
+	wg.Go(func() {
+		serverMux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
+	})
 
 	clientMux.Close()
 	wg.Wait()

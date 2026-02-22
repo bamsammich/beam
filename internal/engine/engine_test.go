@@ -7,11 +7,12 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bamsammich/beam/internal/event"
-	"github.com/bamsammich/beam/internal/filter"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/zeebo/blake3"
+
+	"github.com/bamsammich/beam/internal/event"
+	"github.com/bamsammich/beam/internal/filter"
 )
 
 func hashFile(t *testing.T, path string) []byte {
@@ -35,7 +36,10 @@ func TestEngine_CopyTree(t *testing.T) {
 	_, err := rand.Read(bigData)
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(filepath.Join(src, "sub", "big.bin"), bigData, 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(src, "sub", "deep", "nested.txt"), []byte("nested"), 0644))
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(src, "sub", "deep", "nested.txt"), []byte("nested"), 0644),
+	)
 	require.NoError(t, os.Symlink("nested.txt", filepath.Join(src, "sub", "deep", "link")))
 
 	result := Run(context.Background(), Config{
@@ -47,13 +51,25 @@ func TestEngine_CopyTree(t *testing.T) {
 	})
 
 	require.NoError(t, result.Err)
-	assert.Greater(t, result.Stats.FilesCopied, int64(0))
-	assert.Greater(t, result.Stats.DirsCreated, int64(0))
+	assert.Positive(t, result.Stats.FilesCopied)
+	assert.Positive(t, result.Stats.DirsCreated)
 
 	// Verify checksums.
-	assert.Equal(t, hashFile(t, filepath.Join(src, "root.txt")), hashFile(t, filepath.Join(dst, "root.txt")))
-	assert.Equal(t, hashFile(t, filepath.Join(src, "sub", "big.bin")), hashFile(t, filepath.Join(dst, "sub", "big.bin")))
-	assert.Equal(t, hashFile(t, filepath.Join(src, "sub", "deep", "nested.txt")), hashFile(t, filepath.Join(dst, "sub", "deep", "nested.txt")))
+	assert.Equal(
+		t,
+		hashFile(t, filepath.Join(src, "root.txt")),
+		hashFile(t, filepath.Join(dst, "root.txt")),
+	)
+	assert.Equal(
+		t,
+		hashFile(t, filepath.Join(src, "sub", "big.bin")),
+		hashFile(t, filepath.Join(dst, "sub", "big.bin")),
+	)
+	assert.Equal(
+		t,
+		hashFile(t, filepath.Join(src, "sub", "deep", "nested.txt")),
+		hashFile(t, filepath.Join(dst, "sub", "deep", "nested.txt")),
+	)
 
 	// Verify symlink.
 	target, err := os.Readlink(filepath.Join(dst, "sub", "deep", "link"))
@@ -115,7 +131,7 @@ func TestEngine_DirWithoutRecursive(t *testing.T) {
 		Workers: 1,
 	})
 
-	assert.Error(t, result.Err)
+	require.Error(t, result.Err)
 	assert.Contains(t, result.Err.Error(), "directory")
 }
 
@@ -127,7 +143,10 @@ func TestEngine_ContextCancel(t *testing.T) {
 	require.NoError(t, os.MkdirAll(src, 0755))
 	for i := range 50 {
 		data := make([]byte, 1024*1024) // 1 MiB each
-		require.NoError(t, os.WriteFile(filepath.Join(src, filepath.Base(string(rune('A'+i)))+".bin"), data, 0644))
+		require.NoError(
+			t,
+			os.WriteFile(filepath.Join(src, filepath.Base(string(rune('A'+i)))+".bin"), data, 0644),
+		)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -151,7 +170,10 @@ func TestEngine_DryRun(t *testing.T) {
 
 	require.NoError(t, os.MkdirAll(filepath.Join(src, "sub"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(src, "file.txt"), []byte("data"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(src, "sub", "nested.txt"), []byte("nested"), 0644))
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(src, "sub", "nested.txt"), []byte("nested"), 0644),
+	)
 
 	result := Run(context.Background(), Config{
 		Sources:   []string{src + "/"},
@@ -188,7 +210,10 @@ func TestEngine_EventSequence(t *testing.T) {
 
 	require.NoError(t, os.MkdirAll(filepath.Join(src, "sub"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(src, "file.txt"), []byte("data"), 0644))
-	require.NoError(t, os.WriteFile(filepath.Join(src, "sub", "nested.txt"), []byte("nested"), 0644))
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(src, "sub", "nested.txt"), []byte("nested"), 0644),
+	)
 
 	events := make(chan event.Event, 256)
 
@@ -254,7 +279,7 @@ func TestEngine_WithFilter(t *testing.T) {
 
 	// keep.txt should exist.
 	_, err := os.Stat(filepath.Join(dst, "keep.txt"))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// skip.log should NOT exist.
 	_, err = os.Stat(filepath.Join(dst, "skip.log"))
@@ -571,6 +596,6 @@ func TestEngine_MultiSourceDstMustBeDir(t *testing.T) {
 		Workers: 1,
 	})
 
-	assert.Error(t, result.Err)
+	require.Error(t, result.Err)
 	assert.Contains(t, result.Err.Error(), "not a directory")
 }

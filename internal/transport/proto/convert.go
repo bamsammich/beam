@@ -18,8 +18,8 @@ func ToFileEntry(m FileEntryMsg) transport.FileEntry {
 		IsDir:      m.IsDir,
 		IsSymlink:  m.IsSymlink,
 		LinkTarget: m.LinkTarget,
-		Uid:        m.UID,
-		Gid:        m.GID,
+		UID:        m.UID,
+		GID:        m.GID,
 		Nlink:      m.Nlink,
 		Dev:        m.Dev,
 		Ino:        m.Ino,
@@ -37,8 +37,8 @@ func FromFileEntry(e transport.FileEntry) FileEntryMsg {
 		IsDir:      e.IsDir,
 		IsSymlink:  e.IsSymlink,
 		LinkTarget: e.LinkTarget,
-		UID:        e.Uid,
-		GID:        e.Gid,
+		UID:        e.UID,
+		GID:        e.GID,
 		Nlink:      e.Nlink,
 		Dev:        e.Dev,
 		Ino:        e.Ino,
@@ -48,24 +48,26 @@ func FromFileEntry(e transport.FileEntry) FileEntryMsg {
 // ToCaps converts a CapsResp to a transport.Capabilities.
 func ToCaps(c CapsResp) transport.Capabilities {
 	return transport.Capabilities{
-		SparseDetect: c.SparseDetect,
-		Hardlinks:    c.Hardlinks,
-		Xattrs:       c.Xattrs,
-		AtomicRename: c.AtomicRename,
-		FastCopy:     c.FastCopy,
-		NativeHash:   c.NativeHash,
+		SparseDetect:  c.SparseDetect,
+		Hardlinks:     c.Hardlinks,
+		Xattrs:        c.Xattrs,
+		AtomicRename:  c.AtomicRename,
+		FastCopy:      c.FastCopy,
+		NativeHash:    c.NativeHash,
+		DeltaTransfer: c.DeltaTransfer,
 	}
 }
 
 // FromCaps converts a transport.Capabilities to a CapsResp.
 func FromCaps(c transport.Capabilities) CapsResp {
 	return CapsResp{
-		SparseDetect: c.SparseDetect,
-		Hardlinks:    c.Hardlinks,
-		Xattrs:       c.Xattrs,
-		AtomicRename: c.AtomicRename,
-		FastCopy:     c.FastCopy,
-		NativeHash:   c.NativeHash,
+		SparseDetect:  c.SparseDetect,
+		Hardlinks:     c.Hardlinks,
+		Xattrs:        c.Xattrs,
+		AtomicRename:  c.AtomicRename,
+		FastCopy:      c.FastCopy,
+		NativeHash:    c.NativeHash,
+		DeltaTransfer: c.DeltaTransfer,
 	}
 }
 
@@ -87,4 +89,62 @@ func FromMetadataOpts(o transport.MetadataOpts) MetadataOptsMsg {
 		Owner: o.Owner,
 		Xattr: o.Xattr,
 	}
+}
+
+// ToSignature converts wire BlockSignatureMsg slice to a transport.Signature.
+func ToSignature(blockSize int, msgs []BlockSignatureMsg) transport.Signature {
+	blocks := make([]transport.BlockSignature, len(msgs))
+	for i, m := range msgs {
+		var strong [32]byte
+		copy(strong[:], m.StrongHash)
+		blocks[i] = transport.BlockSignature{
+			Index:      m.Index,
+			Offset:     m.Offset,
+			WeakHash:   m.WeakHash,
+			StrongHash: strong,
+		}
+	}
+	return transport.Signature{BlockSize: blockSize, Blocks: blocks}
+}
+
+// FromSignature converts a transport.Signature to wire BlockSignatureMsg slice.
+func FromSignature(sig transport.Signature) (int, []BlockSignatureMsg) {
+	msgs := make([]BlockSignatureMsg, len(sig.Blocks))
+	for i, b := range sig.Blocks {
+		msgs[i] = BlockSignatureMsg{
+			Index:      b.Index,
+			Offset:     b.Offset,
+			WeakHash:   b.WeakHash,
+			StrongHash: b.StrongHash[:],
+		}
+	}
+	return sig.BlockSize, msgs
+}
+
+// ToDeltaOps converts wire DeltaOpMsg slice to transport DeltaOps.
+func ToDeltaOps(msgs []DeltaOpMsg) []transport.DeltaOp {
+	ops := make([]transport.DeltaOp, len(msgs))
+	for i, m := range msgs {
+		ops[i] = transport.DeltaOp{
+			BlockIdx: m.BlockIdx,
+			Offset:   m.Offset,
+			Length:   m.Length,
+			Literal:  m.Literal,
+		}
+	}
+	return ops
+}
+
+// FromDeltaOps converts transport DeltaOps to wire DeltaOpMsg slice.
+func FromDeltaOps(ops []transport.DeltaOp) []DeltaOpMsg {
+	msgs := make([]DeltaOpMsg, len(ops))
+	for i, op := range ops {
+		msgs[i] = DeltaOpMsg{
+			BlockIdx: op.BlockIdx,
+			Offset:   op.Offset,
+			Length:   op.Length,
+			Literal:  op.Literal,
+		}
+	}
+	return msgs
 }

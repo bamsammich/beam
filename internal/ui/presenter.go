@@ -17,20 +17,24 @@ type Presenter interface {
 // Config configures a Presenter.
 type Config struct {
 	Writer     io.Writer
-	ErrWriter  io.Writer // stderr for progress in non-TTY mode
+	ErrWriter  io.Writer
+	Stats      stats.ReadTicker
+	DstRoot    string
+	Workers    int
 	IsTTY      bool
 	Quiet      bool
 	Verbose    bool
 	ForceFeed  bool
 	ForceRate  bool
 	NoProgress bool
-	Stats      stats.ReadTicker
-	Workers    int
-	DstRoot    string // destination root path, stripped from displayed paths
 }
 
 // NewPresenter creates the appropriate presenter based on configuration.
-func NewPresenter(cfg Config) Presenter {
+//
+//nolint:ireturn // factory function returns interface by design
+func NewPresenter(
+	cfg Config,
+) Presenter {
 	if cfg.Quiet {
 		return &quietPresenter{stats: cfg.Stats}
 	}

@@ -1,6 +1,7 @@
 package proto_test
 
 import (
+	"bytes"
 	"net"
 	"os"
 	"path/filepath"
@@ -8,10 +9,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bamsammich/beam/internal/transport"
-	"github.com/bamsammich/beam/internal/transport/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bamsammich/beam/internal/transport"
+	"github.com/bamsammich/beam/internal/transport/proto"
 )
 
 // testServer sets up a handler over net.Pipe and returns the client mux.
@@ -30,16 +32,12 @@ func testServer(t *testing.T, root string) (clientMux *proto.Mux, cleanup func()
 	handler := proto.NewHandler(readEP, writeEP, serverMux)
 
 	var wg sync.WaitGroup
-	wg.Add(2)
-
-	go func() {
-		defer wg.Done()
-		serverMux.Run()
-	}()
-	go func() {
-		defer wg.Done()
-		clientMux.Run()
-	}()
+	wg.Go(func() {
+		serverMux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
+	})
+	wg.Go(func() {
+		clientMux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
+	})
 
 	// Open a shared handler stream on the server side.
 	serverCh := serverMux.OpenStream(1)
@@ -55,7 +53,14 @@ func testServer(t *testing.T, root string) (clientMux *proto.Mux, cleanup func()
 }
 
 // sendAndRecv is a helper that sends a request frame and waits for a response.
-func sendAndRecv(t *testing.T, mux *proto.Mux, streamID uint32, ch <-chan proto.Frame, msgType byte, payload []byte) proto.Frame {
+func sendAndRecv(
+	t *testing.T,
+	mux *proto.Mux,
+	streamID uint32,
+	ch <-chan proto.Frame,
+	msgType byte,
+	payload []byte,
+) proto.Frame {
 	t.Helper()
 	require.NoError(t, mux.Send(proto.Frame{
 		StreamID: streamID,
@@ -183,6 +188,7 @@ func TestHandlerCreateTempWriteRename(t *testing.T) {
 	assert.Equal(t, "file content here", string(content))
 }
 
+//nolint:revive // cognitive-complexity: test collects streamed walk entries with timeout
 func TestHandlerWalk(t *testing.T) {
 	t.Parallel()
 
@@ -381,4 +387,167 @@ func TestHandlerErrorResponse(t *testing.T) {
 	_, err = errResp.UnmarshalMsg(resp.Payload)
 	require.NoError(t, err)
 	assert.Contains(t, errResp.Message, "nonexistent.txt")
+}
+
+func TestHandlerComputeSignature(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	// Create a 100KB file — big enough for meaningful block signatures.
+	content := make([]byte, 102400)
+	for i := range content {
+		content[i] = byte(i % 251)
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "basis.bin"), content, 0o644))
+
+	mux, cleanup := testServer(t, dir)
+	defer cleanup()
+
+	ch := mux.OpenStream(1)
+	defer mux.CloseStream(1)
+
+	req := proto.ComputeSignatureReq{RelPath: "basis.bin", FileSize: int64(len(content))}
+	payload, err := req.MarshalMsg(nil)
+	require.NoError(t, err)
+
+	resp := sendAndRecv(t, mux, 1, ch, proto.MsgComputeSignatureReq, payload)
+	assert.Equal(t, proto.MsgComputeSignatureResp, resp.MsgType)
+
+	var sigResp proto.ComputeSignatureResp
+	_, err = sigResp.UnmarshalMsg(resp.Payload)
+	require.NoError(t, err)
+
+	assert.Positive(t, sigResp.BlockSize)
+	assert.NotEmpty(t, sigResp.Signatures)
+	// Each sig should have a 32-byte strong hash.
+	for _, sig := range sigResp.Signatures {
+		assert.Len(t, sig.StrongHash, 32)
+	}
+}
+
+func TestHandlerMatchBlocks(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	// Create a file with unique content per block so blocks are distinguishable.
+	content := make([]byte, 102400)
+	for i := range content {
+		content[i] = byte(i % 251) // prime modulus makes blocks unique
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "source.bin"), content, 0o644))
+
+	// Compute signatures of a slightly different version locally.
+	modified := make([]byte, len(content))
+	copy(modified, content)
+	copy(modified[100:116], []byte("MODIFIED_BLOCK!!"))
+	modSig, err := transport.ComputeSignature(bytes.NewReader(modified), int64(len(modified)))
+	require.NoError(t, err)
+
+	mux, cleanup := testServer(t, dir)
+	defer cleanup()
+
+	ch := mux.OpenStream(1)
+	defer mux.CloseStream(1)
+
+	blockSize, sigMsgs := proto.FromSignature(modSig)
+	req := proto.MatchBlocksReq{
+		RelPath:    "source.bin",
+		BlockSize:  blockSize,
+		Signatures: sigMsgs,
+	}
+	payload, err := req.MarshalMsg(nil)
+	require.NoError(t, err)
+
+	resp := sendAndRecv(t, mux, 1, ch, proto.MsgMatchBlocksReq, payload)
+	assert.Equal(t, proto.MsgMatchBlocksResp, resp.MsgType)
+
+	var matchResp proto.MatchBlocksResp
+	_, err = matchResp.UnmarshalMsg(resp.Payload)
+	require.NoError(t, err)
+
+	assert.NotEmpty(t, matchResp.Ops)
+
+	// Should have a mix: at least one block reference and at least one literal
+	// (since the source differs from the modified version we computed sigs for).
+	hasBlock := false
+	hasLiteral := false
+	for _, op := range matchResp.Ops {
+		if op.BlockIdx >= 0 {
+			hasBlock = true
+		} else {
+			hasLiteral = true
+		}
+	}
+	assert.True(t, hasBlock, "expected at least one block reference")
+	assert.True(t, hasLiteral, "expected at least one literal op")
+}
+
+func TestHandlerApplyDelta(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	// Create basis file with unique content per block.
+	basis := make([]byte, 102400)
+	for i := range basis {
+		basis[i] = byte(i % 251)
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "basis.bin"), basis, 0o644))
+
+	// Compute sigs of basis, match against a modified version, get ops.
+	basisSig, err := transport.ComputeSignature(bytes.NewReader(basis), int64(len(basis)))
+	require.NoError(t, err)
+
+	modified := make([]byte, len(basis))
+	copy(modified, basis)
+	copy(modified[100:116], []byte("MODIFIED_BLOCK!!"))
+
+	ops, err := transport.MatchBlocks(bytes.NewReader(modified), basisSig)
+	require.NoError(t, err)
+
+	// Create temp file via handler (use CreateTemp first).
+	mux, cleanup := testServer(t, dir)
+	defer cleanup()
+
+	ch := mux.OpenStream(1)
+	defer mux.CloseStream(1)
+
+	createReq := proto.CreateTempReq{RelPath: "basis.bin", Perm: uint32(os.FileMode(0o644))}
+	createPayload, err := createReq.MarshalMsg(nil)
+	require.NoError(t, err)
+
+	createResp := sendAndRecv(t, mux, 1, ch, proto.MsgCreateTempReq, createPayload)
+	require.Equal(t, proto.MsgCreateTempResp, createResp.MsgType)
+
+	var tempResp proto.CreateTempResp
+	_, err = tempResp.UnmarshalMsg(createResp.Payload)
+	require.NoError(t, err)
+
+	// Close the temp file handle so it can be opened by ApplyDelta.
+	doneReq := proto.WriteDoneReq{Handle: tempResp.Handle}
+	donePayload, err := doneReq.MarshalMsg(nil)
+	require.NoError(t, err)
+	doneFrame := sendAndRecv(t, mux, 1, ch, proto.MsgWriteDoneReq, donePayload)
+	require.Equal(t, proto.MsgWriteDoneResp, doneFrame.MsgType)
+
+	// Now apply delta.
+	applyReq := proto.ApplyDeltaReq{
+		BasisRelPath: "basis.bin",
+		TempRelPath:  tempResp.Name,
+		Ops:          proto.FromDeltaOps(ops),
+	}
+	applyPayload, err := applyReq.MarshalMsg(nil)
+	require.NoError(t, err)
+
+	applyResp := sendAndRecv(t, mux, 1, ch, proto.MsgApplyDeltaReq, applyPayload)
+	assert.Equal(t, proto.MsgApplyDeltaResp, applyResp.MsgType)
+
+	var deltaResp proto.ApplyDeltaResp
+	_, err = deltaResp.UnmarshalMsg(applyResp.Payload)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(modified)), deltaResp.BytesWritten)
+
+	// Verify the temp file has correct content.
+	result, err := os.ReadFile(filepath.Join(dir, tempResp.Name))
+	require.NoError(t, err)
+	assert.Equal(t, modified, result)
 }

@@ -17,12 +17,14 @@ type Segment struct {
 // DetectSparseSegments walks SEEK_DATA/SEEK_HOLE to map out the sparse
 // layout of a file. Returns a single data segment covering the whole file
 // if the filesystem doesn't support sparse detection.
+//
+//nolint:revive // cognitive-complexity: SEEK_DATA/SEEK_HOLE state machine with error recovery
 func DetectSparseSegments(fd *os.File, fileSize int64) ([]Segment, error) {
 	if fileSize == 0 {
 		return nil, nil
 	}
 
-	rawFd := int(fd.Fd())
+	rawFd := int(fd.Fd()) //nolint:gosec // G115: fd conversion is safe for file descriptors
 	var segments []Segment
 	offset := int64(0)
 
@@ -60,12 +62,13 @@ func DetectSparseSegments(fd *os.File, fileSize int64) ([]Segment, error) {
 		// Find the end of this data region (start of next hole).
 		holeStart, err := seekHole(rawFd, dataStart)
 		if err != nil {
-			if isENXIO(err) {
+			switch {
+			case isENXIO(err):
 				// Data extends to EOF.
 				holeStart = fileSize
-			} else if isEINVAL(err) {
+			case isEINVAL(err):
 				return wholeFileSegment(fileSize), nil
-			} else {
+			default:
 				return nil, err
 			}
 		}

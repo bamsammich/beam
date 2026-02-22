@@ -3,8 +3,9 @@ package transport_test
 import (
 	"testing"
 
-	"github.com/bamsammich/beam/internal/transport"
 	"github.com/stretchr/testify/assert"
+
+	"github.com/bamsammich/beam/internal/transport"
 )
 
 func TestParseLocation(t *testing.T) {
@@ -144,9 +145,9 @@ func TestParseLocationBeamURL(t *testing.T) {
 		name      string
 		input     string
 		wantHost  string
-		wantPort  int
 		wantPath  string
 		wantToken string
+		wantPort  int
 		wantBeam  bool
 	}{
 		{
@@ -220,8 +221,8 @@ func TestLocation_String(t *testing.T) {
 
 	tests := []struct {
 		name string
-		loc  transport.Location
 		want string
+		loc  transport.Location
 	}{
 		{
 			name: "local",
@@ -240,7 +241,13 @@ func TestLocation_String(t *testing.T) {
 		},
 		{
 			name: "beam with token",
-			loc:  transport.Location{Scheme: "beam", Host: "nas", Port: 7223, Path: "/backup", Token: "mytoken"},
+			loc: transport.Location{
+				Scheme: "beam",
+				Host:   "nas",
+				Port:   7223,
+				Path:   "/backup",
+				Token:  "mytoken",
+			},
 			want: "beam://mytoken@nas:7223/backup",
 		},
 		{

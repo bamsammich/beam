@@ -19,26 +19,26 @@ import (
 
 // ScannerConfig controls scanner behavior.
 type ScannerConfig struct {
+	Events         chan<- event.Event
+	Filter         *filter.Chain
+	Stats          stats.Writer            // if set, skipped-file stats are recorded directly
+	SrcEndpoint    transport.ReadEndpoint  // nil = local filesystem
+	DstEndpoint    transport.WriteEndpoint // nil = local filesystem
 	SrcRoot        string
 	DstRoot        string
-	Workers        int
 	ChunkThreshold int64
+	Workers        int
 	FollowSymlinks bool
 	IncludeXattrs  bool
 	SparseDetect   bool
-	Events         chan<- event.Event
-	Filter         *filter.Chain
-	Stats          stats.Writer // if set, skipped-file stats are recorded directly
-	SrcEndpoint    transport.ReadEndpoint  // nil = local filesystem
-	DstEndpoint    transport.WriteEndpoint // nil = local filesystem
 }
 
 // Scanner traverses a directory tree in parallel and emits FileTask items.
 type Scanner struct {
-	cfg        ScannerConfig
 	tasks      chan FileTask
 	errs       chan error
-	inodeSeen  sync.Map // DevIno -> string (first path seen)
+	inodeSeen  sync.Map
+	cfg        ScannerConfig
 	totalFiles atomic.Int64
 	totalBytes atomic.Int64
 }
@@ -96,10 +96,15 @@ func (s *Scanner) scanTree(ctx context.Context) {
 	outstanding.Wait()
 	close(workQueue)
 	workerWg.Wait()
-
 }
 
-func (s *Scanner) scanDir(ctx context.Context, srcPath string, workQueue chan<- string, outstanding *sync.WaitGroup) {
+//nolint:revive // cognitive-complexity: directory scan with stat, filter, and task emission
+func (s *Scanner) scanDir(
+	ctx context.Context,
+	srcPath string,
+	workQueue chan<- string,
+	outstanding *sync.WaitGroup,
+) {
 	relPath, err := filepath.Rel(s.cfg.SrcRoot, srcPath)
 	if err != nil {
 		s.sendErr(fmt.Errorf("rel path for %s: %w", srcPath, err))
@@ -114,7 +119,11 @@ func (s *Scanner) scanDir(ctx context.Context, srcPath string, workQueue chan<- 
 		return
 	}
 
-	stat := info.Sys().(*syscall.Stat_t)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		s.sendErr(fmt.Errorf("unsupported stat type for %s", srcPath))
+		return
+	}
 
 	// Emit directory task (except root, which the caller creates).
 	if srcPath != s.cfg.SrcRoot {
@@ -123,8 +132,8 @@ func (s *Scanner) scanDir(ctx context.Context, srcPath string, workQueue chan<- 
 			DstPath: dstPath,
 			Type:    Dir,
 			Mode:    uint32(info.Mode()),
-			Uid:     stat.Uid,
-			Gid:     stat.Gid,
+			UID:     stat.Uid,
+			GID:     stat.Gid,
 			ModTime: info.ModTime(),
 			AccTime: atimeFromStat(stat),
 		})
@@ -152,18 +161,30 @@ func (s *Scanner) scanDir(ctx context.Context, srcPath string, workQueue chan<- 
 	}
 }
 
-func (s *Scanner) processEntry(ctx context.Context, srcPath, dstPath string, workQueue chan<- string, outstanding *sync.WaitGroup) error {
+//nolint:revive // cognitive-complexity: type-switch dispatch for dirs, symlinks, regulars
+func (s *Scanner) processEntry(
+	ctx context.Context,
+	srcPath, dstPath string,
+	workQueue chan<- string,
+	outstanding *sync.WaitGroup,
+) error {
 	info, err := os.Lstat(srcPath)
 	if err != nil {
 		return fmt.Errorf("lstat %s: %w", srcPath, err)
 	}
 
-	stat := info.Sys().(*syscall.Stat_t)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("unsupported stat type for %s", srcPath)
+	}
 	mode := info.Mode()
 
 	// Apply filter if configured.
 	if s.cfg.Filter != nil {
-		relPath, _ := filepath.Rel(s.cfg.SrcRoot, srcPath)
+		relPath, relErr := filepath.Rel(s.cfg.SrcRoot, srcPath)
+		if relErr != nil {
+			return fmt.Errorf("rel path %s: %w", srcPath, relErr)
+		}
 		if !s.cfg.Filter.Match(relPath, mode.IsDir(), info.Size()) {
 			s.emit(event.Event{Type: event.FileSkipped, Path: relPath, Size: info.Size()})
 			return nil
@@ -191,8 +212,8 @@ func (s *Scanner) processEntry(ctx context.Context, srcPath, dstPath string, wor
 			DstPath:    dstPath,
 			Type:       Symlink,
 			Mode:       uint32(mode),
-			Uid:        stat.Uid,
-			Gid:        stat.Gid,
+			UID:        stat.Uid,
+			GID:        stat.Gid,
 			ModTime:    info.ModTime(),
 			AccTime:    atimeFromStat(stat),
 			LinkTarget: target,
@@ -207,15 +228,26 @@ func (s *Scanner) processEntry(ctx context.Context, srcPath, dstPath string, wor
 	}
 }
 
-func (s *Scanner) processRegular(srcPath, dstPath string, info os.FileInfo, stat *syscall.Stat_t) error {
+//nolint:gocyclo,revive // skip detection, hardlink tracking, sparse detection, chunking
+func (s *Scanner) processRegular(
+	srcPath, dstPath string,
+	info os.FileInfo,
+	stat *syscall.Stat_t,
+) error {
 	mode := info.Mode()
 
 	// Skip files where the destination already exists with matching
 	// size and mtime.
-	relDst, _ := filepath.Rel(s.cfg.DstRoot, dstPath)
-	if dstEntry, err := s.cfg.DstEndpoint.Stat(relDst); err == nil {
+	relDst, err := filepath.Rel(s.cfg.DstRoot, dstPath)
+	if err != nil {
+		return fmt.Errorf("rel path %s: %w", dstPath, err)
+	}
+	if dstEntry, statErr := s.cfg.DstEndpoint.Stat(relDst); statErr == nil {
 		if dstEntry.Size == info.Size() && dstEntry.ModTime.Equal(info.ModTime()) {
-			relPath, _ := filepath.Rel(s.cfg.SrcRoot, srcPath)
+			relPath, relErr := filepath.Rel(s.cfg.SrcRoot, srcPath)
+			if relErr != nil {
+				return fmt.Errorf("rel path %s: %w", srcPath, relErr)
+			}
 			s.emit(event.Event{Type: event.FileSkipped, Path: relPath, Size: info.Size()})
 			if s.cfg.Stats != nil {
 				s.cfg.Stats.AddFilesSkipped(1)
@@ -269,8 +301,8 @@ func (s *Scanner) processRegular(srcPath, dstPath string, info os.FileInfo, stat
 		Type:     Regular,
 		Size:     info.Size(),
 		Mode:     uint32(mode),
-		Uid:      stat.Uid,
-		Gid:      stat.Gid,
+		UID:      stat.Uid,
+		GID:      stat.Gid,
 		ModTime:  info.ModTime(),
 		AccTime:  atimeFromStat(stat),
 		DevIno:   devino,
@@ -305,6 +337,8 @@ func (s *Scanner) emit(e event.Event) {
 // Prescan walks the source tree counting files and bytes without building tasks.
 // It's much faster than a full scan (just readdir+lstat, no file opens or sparse
 // detection) and provides accurate totals for the progress display.
+//
+//nolint:revive // cognitive-complexity: parallel directory walk with filter and aggregation
 func Prescan(ctx context.Context, root string, f *filter.Chain) (files int64, bytes int64) {
 	type result struct {
 		files int64
@@ -319,9 +353,7 @@ func Prescan(ctx context.Context, root string, f *filter.Chain) (files int64, by
 	// Prescan workers.
 	var wg sync.WaitGroup
 	for range workers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for dir := range workQueue {
 				entries, err := os.ReadDir(dir)
 				if err != nil {
@@ -345,8 +377,8 @@ func Prescan(ctx context.Context, root string, f *filter.Chain) (files int64, by
 
 					// Apply filter.
 					if f != nil {
-						relPath, _ := filepath.Rel(root, path)
-						if !f.Match(relPath, mode.IsDir(), info.Size()) {
+						relPath, relErr := filepath.Rel(root, path)
+						if relErr != nil || !f.Match(relPath, mode.IsDir(), info.Size()) {
 							continue
 						}
 					}
@@ -364,7 +396,7 @@ func Prescan(ctx context.Context, root string, f *filter.Chain) (files int64, by
 				}
 				outstanding.Done()
 			}
-		}()
+		})
 	}
 
 	// Seed root.
@@ -402,11 +434,4 @@ func splitIntoChunks(fileSize, chunkSize int64) []Chunk {
 
 func atimeFromStat(stat *syscall.Stat_t) time.Time {
 	return time.Unix(stat.Atim.Sec, stat.Atim.Nsec)
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }

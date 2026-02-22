@@ -6,12 +6,13 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/bamsammich/beam/internal/event"
-	"github.com/bamsammich/beam/internal/transport"
 	"github.com/bamsammich/beam/internal/transport/beam"
 	"github.com/bamsammich/beam/internal/transport/proto"
-	"github.com/stretchr/testify/require"
 )
 
 // createTestTree populates root with a standard test tree:
@@ -97,6 +98,7 @@ func drainEvents(t *testing.T) chan<- event.Event {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		//nolint:revive // empty-block: intentionally draining event channel
 		for range ch {
 		}
 	}()
@@ -123,42 +125,61 @@ func startTestDaemon(t *testing.T, root string) (addr, token string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	go daemon.Serve(ctx)
+	go func() { _ = daemon.Serve(ctx) }() //nolint:errcheck // test daemon; error not needed
 
 	return daemon.Addr().String(), token
 }
 
-// dialBeamReadEndpoint dials a beam daemon and returns a BeamReadEndpoint.
+// dialBeamReadEndpoint dials a beam daemon and returns a ReadEndpoint.
 // The underlying mux is closed on test cleanup.
-func dialBeamReadEndpoint(t *testing.T, addr, token, root string) *beam.BeamReadEndpoint {
+func dialBeamReadEndpoint(t *testing.T, addr, token, root string) *beam.ReadEndpoint {
 	t.Helper()
 
 	mux, _, caps, err := beam.DialBeam(addr, token, proto.ClientTLSConfig(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 
-	return beam.NewBeamReadEndpoint(mux, root, caps)
+	return beam.NewReadEndpoint(mux, root, caps)
 }
 
-// dialBeamWriteEndpoint dials a beam daemon and returns a BeamWriteEndpoint.
+// dialBeamWriteEndpoint dials a beam daemon and returns a WriteEndpoint.
 // The underlying mux is closed on test cleanup.
-func dialBeamWriteEndpoint(t *testing.T, addr, token, root string) *beam.BeamWriteEndpoint {
+func dialBeamWriteEndpoint(t *testing.T, addr, token, root string) *beam.WriteEndpoint {
 	t.Helper()
 
 	mux, _, caps, err := beam.DialBeam(addr, token, proto.ClientTLSConfig(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 
-	return beam.NewBeamWriteEndpoint(mux, root, caps)
+	return beam.NewWriteEndpoint(mux, root, caps)
 }
 
-// reRootedReadEndpoint wraps a ReadEndpoint to override Root() while
-// delegating all I/O to the underlying endpoint. This is needed for
-// sftp-to-local tests where the scanner walks the local filesystem but
-// the worker computes relSrc via SrcEndpoint.Root().
-type reRootedReadEndpoint struct {
-	transport.ReadEndpoint
-	localRoot string
-}
+// createModifiedTestTree creates a test tree at root that is slightly
+// different from createTestTree: root.txt has modified content, big.bin
+// has a few changed bytes. Used to test delta transfer.
+//
+// Modified files are given an mtime 1 hour in the future so that the
+// scanner's size+mtime skip detection does not suppress them when the
+// source and destination trees are created within the same clock tick.
+func createModifiedTestTree(t *testing.T, root string) {
+	t.Helper()
+	createTestTree(t, root)
 
-func (e *reRootedReadEndpoint) Root() string { return e.localRoot }
+	futureTime := time.Now().Add(time.Hour)
+
+	// Modify root.txt (different content AND different size).
+	rootPath := filepath.Join(root, "root.txt")
+	require.NoError(t, os.WriteFile(rootPath,
+		[]byte("MODIFIED root file content -- changed"),
+		0o644,
+	))
+	require.NoError(t, os.Chtimes(rootPath, futureTime, futureTime))
+
+	// Modify a few bytes in big.bin (most blocks unchanged, same size).
+	bigPath := filepath.Join(root, "big.bin")
+	data, err := os.ReadFile(bigPath)
+	require.NoError(t, err)
+	copy(data[100:116], []byte("MODIFIED_BLOCK!!"))
+	require.NoError(t, os.WriteFile(bigPath, data, 0o644))
+	require.NoError(t, os.Chtimes(bigPath, futureTime, futureTime))
+}

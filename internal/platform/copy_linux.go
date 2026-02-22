@@ -36,6 +36,7 @@ func CopyFile(params CopyFileParams) (CopyResult, error) {
 	return copyReadWrite(params)
 }
 
+//nolint:gosec // G115: fd values are small non-negative integers from os.File.Fd()
 func copyFileRange(params CopyFileParams) (CopyResult, error) {
 	srcFd, err := os.Open(params.SrcPath)
 	if err != nil {
@@ -49,7 +50,9 @@ func copyFileRange(params CopyFileParams) (CopyResult, error) {
 
 	var totalWritten int64
 	for remaining > 0 {
-		n, err := unix.CopyFileRange(int(srcFd.Fd()), &roff, int(params.DstFd.Fd()), &woff, int(remaining), 0)
+		srcRawFd := int(srcFd.Fd())
+		dstRawFd := int(params.DstFd.Fd())
+		n, err := unix.CopyFileRange(srcRawFd, &roff, dstRawFd, &woff, int(remaining), 0)
 		if err != nil {
 			if totalWritten == 0 {
 				return CopyResult{}, err
@@ -66,6 +69,7 @@ func copyFileRange(params CopyFileParams) (CopyResult, error) {
 	return CopyResult{BytesWritten: totalWritten, Method: CopyFileRange}, nil
 }
 
+//nolint:gosec // G115: fd values are small non-negative integers from os.File.Fd()
 func copySendfile(params CopyFileParams) (CopyResult, error) {
 	srcFd, err := os.Open(params.SrcPath)
 	if err != nil {

@@ -1,10 +1,12 @@
 package proto
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/bamsammich/beam/internal/transport"
@@ -42,6 +44,7 @@ func (h *Handler) ServeStream(streamID uint32, ch <-chan Frame) {
 	}
 }
 
+//nolint:gocyclo,revive // cyclomatic: protocol message dispatcher with one case per message type
 func (h *Handler) dispatch(streamID uint32, f Frame) error {
 	switch f.MsgType {
 	// ReadEndpoint operations.
@@ -77,6 +80,14 @@ func (h *Handler) dispatch(streamID uint32, f Frame) error {
 		return h.handleLink(streamID, f.Payload)
 	case MsgSetMetadataReq:
 		return h.handleSetMetadata(streamID, f.Payload)
+
+	// Delta transfer operations.
+	case MsgComputeSignatureReq:
+		return h.handleComputeSignature(streamID, f.Payload)
+	case MsgMatchBlocksReq:
+		return h.handleMatchBlocks(streamID, f.Payload)
+	case MsgApplyDeltaReq:
+		return h.handleApplyDelta(streamID, f.Payload)
 
 	// Utility.
 	case MsgCapsReq:
@@ -151,10 +162,11 @@ func (h *Handler) handleReadDir(streamID uint32, data []byte) error {
 	return h.mux.Send(Frame{StreamID: streamID, MsgType: MsgReadDirResp, Payload: payload})
 }
 
+//nolint:revive // cognitive-complexity: streaming read with chunked send and EOF handling
 func (h *Handler) handleOpenRead(streamID uint32, data []byte) error {
 	var req OpenReadReq
-	if _, err := req.UnmarshalMsg(data); err != nil {
-		return fmt.Errorf("decode OpenReadReq: %w", err)
+	if _, unmarshalErr := req.UnmarshalMsg(data); unmarshalErr != nil {
+		return fmt.Errorf("decode OpenReadReq: %w", unmarshalErr)
 	}
 
 	rc, err := h.read.OpenRead(req.RelPath)
@@ -168,12 +180,14 @@ func (h *Handler) handleOpenRead(streamID uint32, data []byte) error {
 		n, readErr := rc.Read(buf)
 		if n > 0 {
 			msg := ReadDataMsg{Data: buf[:n]}
-			payload, err := msg.MarshalMsg(nil)
-			if err != nil {
-				return err
+			payload, marshalErr := msg.MarshalMsg(nil)
+			if marshalErr != nil {
+				return marshalErr
 			}
-			if err := h.mux.Send(Frame{StreamID: streamID, MsgType: MsgReadData, Payload: payload}); err != nil {
-				return err
+			if sendErr := h.mux.Send(
+				Frame{StreamID: streamID, MsgType: MsgReadData, Payload: payload},
+			); sendErr != nil {
+				return sendErr
 			}
 		}
 		if readErr == io.EOF {
@@ -256,7 +270,7 @@ func (h *Handler) handleWriteData(data []byte) error {
 	if !ok {
 		return fmt.Errorf("unknown temp file handle: %s", msg.Handle)
 	}
-	wf := val.(transport.WriteFile)
+	wf, _ := val.(transport.WriteFile) //nolint:revive // unchecked-type-assertion: type is guaranteed by handleCreateTemp
 
 	_, err := wf.Write(msg.Data)
 	return err
@@ -272,7 +286,7 @@ func (h *Handler) handleWriteDone(streamID uint32, data []byte) error {
 	if !ok {
 		return fmt.Errorf("unknown temp file handle: %s", req.Handle)
 	}
-	wf := val.(transport.WriteFile)
+	wf, _ := val.(transport.WriteFile) //nolint:revive // unchecked-type-assertion: type is guaranteed by handleCreateTemp
 
 	if err := wf.Close(); err != nil {
 		return err
@@ -378,6 +392,117 @@ func (h *Handler) handleCaps(streamID uint32) error {
 	return h.mux.Send(Frame{StreamID: streamID, MsgType: MsgCapsResp, Payload: payload})
 }
 
+func (h *Handler) handleComputeSignature(streamID uint32, data []byte) error {
+	var req ComputeSignatureReq
+	if _, err := req.UnmarshalMsg(data); err != nil {
+		return fmt.Errorf("decode ComputeSignatureReq: %w", err)
+	}
+
+	rc, err := h.read.OpenRead(req.RelPath)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+
+	sig, err := transport.ComputeSignature(rc, req.FileSize)
+	if err != nil {
+		return err
+	}
+
+	blockSize, sigMsgs := FromSignature(sig)
+	resp := ComputeSignatureResp{
+		BlockSize:  blockSize,
+		Signatures: sigMsgs,
+	}
+	payload, err := resp.MarshalMsg(nil)
+	if err != nil {
+		return err
+	}
+	return h.mux.Send(Frame{StreamID: streamID, MsgType: MsgComputeSignatureResp, Payload: payload})
+}
+
+func (h *Handler) handleMatchBlocks(streamID uint32, data []byte) error {
+	var req MatchBlocksReq
+	if _, err := req.UnmarshalMsg(data); err != nil {
+		return fmt.Errorf("decode MatchBlocksReq: %w", err)
+	}
+
+	rc, err := h.read.OpenRead(req.RelPath)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+
+	sig := ToSignature(req.BlockSize, req.Signatures)
+	ops, err := transport.MatchBlocks(rc, sig)
+	if err != nil {
+		return err
+	}
+
+	resp := MatchBlocksResp{Ops: FromDeltaOps(ops)}
+	payload, err := resp.MarshalMsg(nil)
+	if err != nil {
+		return err
+	}
+	return h.mux.Send(Frame{StreamID: streamID, MsgType: MsgMatchBlocksResp, Payload: payload})
+}
+
+func (h *Handler) handleApplyDelta(streamID uint32, data []byte) error {
+	var req ApplyDeltaReq
+	if _, err := req.UnmarshalMsg(data); err != nil {
+		return fmt.Errorf("decode ApplyDeltaReq: %w", err)
+	}
+
+	// Open basis file for reading.
+	basisRC, err := h.read.OpenRead(req.BasisRelPath)
+	if err != nil {
+		return err
+	}
+	defer basisRC.Close()
+
+	basisSeeker, ok := basisRC.(io.ReadSeeker)
+	if !ok {
+		return errors.New("basis file does not support seeking")
+	}
+
+	// Open temp file for writing directly on the filesystem.
+	// The temp file was created via CreateTemp and is relative to the write endpoint root.
+	absPath := filepath.Join(h.write.Root(), req.TempRelPath)
+	tmpFile, err := os.OpenFile(absPath, os.O_WRONLY|os.O_TRUNC, 0o644)
+	if err != nil {
+		return fmt.Errorf("open temp file for delta: %w", err)
+	}
+
+	ops := ToDeltaOps(req.Ops)
+	cw := &countingWriter{w: tmpFile}
+	if applyErr := transport.ApplyDelta(basisSeeker, ops, cw); applyErr != nil {
+		tmpFile.Close()
+		return applyErr
+	}
+	if closeErr := tmpFile.Close(); closeErr != nil {
+		return closeErr
+	}
+
+	resp := ApplyDeltaResp{BytesWritten: cw.n}
+	payload, err := resp.MarshalMsg(nil)
+	if err != nil {
+		return err
+	}
+	return h.mux.Send(Frame{StreamID: streamID, MsgType: MsgApplyDeltaResp, Payload: payload})
+}
+
+// countingWriter wraps an io.Writer and counts bytes written.
+type countingWriter struct {
+	w io.Writer
+	n int64
+}
+
+func (cw *countingWriter) Write(p []byte) (int, error) {
+	n, err := cw.w.Write(p)
+	cw.n += int64(n)
+	return n, err
+}
+
 func (h *Handler) sendAck(streamID uint32) error {
 	ack := AckResp{}
 	payload, err := ack.MarshalMsg(nil)
@@ -394,7 +519,9 @@ func (h *Handler) sendError(streamID uint32, origErr error) {
 		slog.Error("failed to marshal error response", "error", err)
 		return
 	}
-	if err := h.mux.Send(Frame{StreamID: streamID, MsgType: MsgErrorResp, Payload: payload}); err != nil {
+	if err := h.mux.Send(
+		Frame{StreamID: streamID, MsgType: MsgErrorResp, Payload: payload},
+	); err != nil {
 		slog.Error("failed to send error response", "error", err)
 	}
 }

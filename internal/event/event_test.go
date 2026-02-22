@@ -5,26 +5,27 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestTypeString(t *testing.T) {
 	tests := []struct {
-		typ  Type
 		want string
+		typ  Type
 	}{
-		{ScanStarted, "ScanStarted"},
-		{ScanComplete, "ScanComplete"},
-		{FileStarted, "FileStarted"},
-		{FileProgress, "FileProgress"},
-		{FileCompleted, "FileCompleted"},
-		{FileFailed, "FileFailed"},
-		{FileSkipped, "FileSkipped"},
-		{DirCreated, "DirCreated"},
-		{HardlinkCreated, "HardlinkCreated"},
-		{DeleteFile, "DeleteFile"},
-		{VerifyStarted, "VerifyStarted"},
-		{VerifyOK, "VerifyOK"},
-		{VerifyFailed, "VerifyFailed"},
+		{want: "ScanStarted", typ: ScanStarted},
+		{want: "ScanComplete", typ: ScanComplete},
+		{want: "FileStarted", typ: FileStarted},
+		{want: "FileProgress", typ: FileProgress},
+		{want: "FileCompleted", typ: FileCompleted},
+		{want: "FileFailed", typ: FileFailed},
+		{want: "FileSkipped", typ: FileSkipped},
+		{want: "DirCreated", typ: DirCreated},
+		{want: "HardlinkCreated", typ: HardlinkCreated},
+		{want: "DeleteFile", typ: DeleteFile},
+		{want: "VerifyStarted", typ: VerifyStarted},
+		{want: "VerifyOK", typ: VerifyOK},
+		{want: "VerifyFailed", typ: VerifyFailed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
@@ -45,7 +46,7 @@ func TestEventZeroValue(t *testing.T) {
 	assert.Zero(t, e.Size)
 	assert.Zero(t, e.Total)
 	assert.Zero(t, e.TotalSize)
-	assert.Nil(t, e.Error)
+	require.NoError(t, e.Error)
 	assert.Zero(t, e.WorkerID)
 }
 

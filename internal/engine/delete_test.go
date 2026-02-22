@@ -6,11 +6,12 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/filter"
 	"github.com/bamsammich/beam/internal/transport"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestDeleteExtraneous_OverlappingTrees(t *testing.T) {
@@ -45,9 +46,9 @@ func TestDeleteExtraneous_OverlappingTrees(t *testing.T) {
 
 	// Others should remain.
 	_, err = os.Stat(filepath.Join(dst, "file1.txt"))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	_, err = os.Stat(filepath.Join(dst, "file2.txt"))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 }
 
 func TestDeleteExtraneous_NonOverlapping(t *testing.T) {
@@ -130,7 +131,7 @@ func TestDeleteExtraneous_FilterInteraction(t *testing.T) {
 
 	// filtered.log should remain (excluded from filter = don't touch).
 	_, err = os.Stat(filepath.Join(dst, "filtered.log"))
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// extra.txt should be deleted.
 	_, err = os.Stat(filepath.Join(dst, "extra.txt"))
@@ -146,7 +147,10 @@ func TestDeleteExtraneous_NestedEmptyDirs(t *testing.T) {
 
 	// Destination has a nested directory structure not in source.
 	require.NoError(t, os.MkdirAll(filepath.Join(dst, "old", "deep", "nested"), 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(dst, "old", "deep", "nested", "file.txt"), []byte("x"), 0644))
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(dst, "old", "deep", "nested", "file.txt"), []byte("x"), 0644),
+	)
 
 	deleted, err := DeleteExtraneous(context.Background(), DeleteConfig{
 		SrcRoot:     src,
@@ -156,7 +160,7 @@ func TestDeleteExtraneous_NestedEmptyDirs(t *testing.T) {
 	})
 
 	require.NoError(t, err)
-	assert.Greater(t, deleted, 0)
+	assert.Positive(t, deleted)
 
 	// The entire old/ tree should be gone.
 	_, err = os.Stat(filepath.Join(dst, "old"))

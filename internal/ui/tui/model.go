@@ -46,9 +46,9 @@ func tickCmd() tea.Cmd {
 
 // saveModal manages the text input overlay for saving results.
 type saveModal struct {
-	active bool
 	input  string
 	cursor int
+	active bool
 }
 
 func (s *saveModal) insertRune(r rune) {
@@ -91,35 +91,35 @@ func (s *saveModal) render() string {
 
 // Model is the root Bubble Tea model.
 type Model struct {
-	events  <-chan event.Event
-	stats   stats.ReadTicker
-	workers int
-	dstRoot string
-	srcRoot string
-
-	mode      viewMode
-	feed      feedView
-	rate      rateView
-	width     int
-	height    int
-	statusMsg string // transient notification
-	done      bool   // transfer complete
-	quitting  bool
-
-	lastSnap  stats.Snapshot
-	lastSpeed float64
-	lastETA   time.Duration
-
-	// Worker throttle.
-	workerLimit *atomic.Int32 // nil = no throttling
+	stats       stats.ReadTicker
+	workerLimit *atomic.Int32
+	rate        rateView
+	events      <-chan event.Event
+	statusMsg   string
+	dstRoot     string
+	srcRoot     string
+	save        saveModal
+	feed        feedView
+	lastSnap    stats.Snapshot
+	width       int
+	height      int
+	lastSpeed   float64
+	lastETA     time.Duration
+	mode        viewMode
 	maxWorkers  int
-
-	// Save modal.
-	save saveModal
+	workers     int
+	done        bool
+	quitting    bool
 }
 
 // NewModel creates a new TUI model.
-func NewModel(events <-chan event.Event, collector stats.ReadTicker, workers int, dstRoot, srcRoot string, workerLimit *atomic.Int32) Model {
+func NewModel(
+	events <-chan event.Event,
+	collector stats.ReadTicker,
+	workers int,
+	dstRoot, srcRoot string,
+	workerLimit *atomic.Int32,
+) Model {
 	return Model{
 		events:      events,
 		stats:       collector,
@@ -142,6 +142,7 @@ func (m Model) Init() tea.Cmd {
 	)
 }
 
+//nolint:ireturn // implements bubbletea.Model interface
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.KeyMsg:
@@ -182,6 +183,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+//nolint:gocyclo,revive,ireturn // cyclomatic: key handler with many cases; returns tea.Model for Bubble Tea
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	// When save modal is active, capture all input.
 	if m.save.active {
@@ -198,12 +200,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.statusMsg = ""
 		return m, nil
 
-	case "f":
-		m.mode = viewFeed
-		m.statusMsg = ""
-		return m, nil
-
-	case "e":
+	case "f", "e":
 		m.mode = viewFeed
 		m.statusMsg = ""
 		return m, nil
@@ -260,6 +257,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+//nolint:ireturn // returns tea.Model for Bubble Tea update chain
 func (m Model) handleSaveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.Type {
 	case tea.KeyEscape:
@@ -297,6 +295,7 @@ func (m Model) handleSaveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+//nolint:ireturn // returns tea.Model for Bubble Tea update chain
 func (m Model) adjustWorkers(delta int) (tea.Model, tea.Cmd) {
 	if m.workerLimit == nil {
 		m.statusMsg = "worker adjustment: not available"
@@ -304,12 +303,12 @@ func (m Model) adjustWorkers(delta int) (tea.Model, tea.Cmd) {
 	}
 
 	current := m.workerLimit.Load()
-	next := current + int32(delta)
+	next := current + int32(delta) //nolint:gosec // G115: delta is always +1 or -1
 	if next < 1 {
 		next = 1
 	}
-	if next > int32(m.maxWorkers) {
-		next = int32(m.maxWorkers)
+	if next > int32(m.maxWorkers) { //nolint:gosec // G115: worker count bounded by maxWorkers
+		next = int32(m.maxWorkers) //nolint:gosec // G115: worker count bounded by maxWorkers
 	}
 	m.workerLimit.Store(next)
 	m.statusMsg = fmt.Sprintf("workers: %d / %d", next, m.maxWorkers)
@@ -362,11 +361,14 @@ func (m Model) writeReport(path string) tea.Cmd {
 			}
 		}
 
-		err := os.WriteFile(path, []byte(b.String()), 0o644) //nolint:gosec // user-chosen path for report output
+		reportData := []byte(b.String())
+		//nolint:gosec // G306: report file is user-readable by design
+		err := os.WriteFile(path, reportData, 0o644)
 		return saveResultMsg{err: err}
 	}
 }
 
+//nolint:ireturn // returns tea.Model for Bubble Tea update chain
 func (m Model) handleEngineEvent(ev event.Event) (tea.Model, tea.Cmd) {
 	// Totals are set on the collector directly by the engine;
 	// presenters only read from the collector, never write.
@@ -399,17 +401,20 @@ func (m Model) View() string {
 	case viewFeed:
 		b.WriteString(m.feed.view(m.width, contentHeight, m.lastSpeed))
 	case viewRate:
-		b.WriteString(m.rate.view(m.width, contentHeight, m.lastSnap, m.stats, m.activeWorkerCount()))
+		b.WriteString(
+			m.rate.view(m.width, contentHeight, m.lastSnap, m.stats, m.activeWorkerCount()),
+		)
 	}
 
 	// Save modal or status message.
-	if m.save.active {
+	switch {
+	case m.save.active:
 		b.WriteString(m.save.render())
 		b.WriteByte('\n')
-	} else if m.statusMsg != "" {
+	case m.statusMsg != "":
 		b.WriteString(styleStatus.Render("  " + m.statusMsg))
 		b.WriteByte('\n')
-	} else {
+	default:
 		b.WriteByte('\n')
 	}
 

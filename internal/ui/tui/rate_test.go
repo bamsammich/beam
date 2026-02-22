@@ -3,9 +3,10 @@ package tui
 import (
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/stats"
-	"github.com/stretchr/testify/assert"
 )
 
 func TestRateView_WorkerTracking(t *testing.T) {

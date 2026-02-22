@@ -1,19 +1,20 @@
 package beam_test
 
 import (
+	"bytes"
 	"context"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bamsammich/beam/internal/transport"
 	"github.com/bamsammich/beam/internal/transport/beam"
 	"github.com/bamsammich/beam/internal/transport/proto"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 // startTestDaemon starts a daemon on a random port and returns connect info.
@@ -31,12 +32,15 @@ func startTestDaemon(t *testing.T, root string) (addr, token string) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	go daemon.Serve(ctx)
+	go daemon.Serve(ctx) //nolint:errcheck // test daemon; error not needed
 
 	return daemon.Addr().String(), token
 }
 
-func dialTestEndpoints(t *testing.T, root string) (*beam.BeamReadEndpoint, *beam.BeamWriteEndpoint) {
+func dialTestEndpoints(
+	t *testing.T,
+	root string,
+) (*beam.ReadEndpoint, *beam.WriteEndpoint) {
 	t.Helper()
 
 	addr, token := startTestDaemon(t, root)
@@ -45,8 +49,8 @@ func dialTestEndpoints(t *testing.T, root string) (*beam.BeamReadEndpoint, *beam
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 
-	readEP := beam.NewBeamReadEndpoint(mux, root, caps)
-	writeEP := beam.NewBeamWriteEndpoint(mux, root, caps)
+	readEP := beam.NewReadEndpoint(mux, root, caps)
+	writeEP := beam.NewWriteEndpoint(mux, root, caps)
 	return readEP, writeEP
 }
 
@@ -256,10 +260,116 @@ func TestDialBeamWrongToken(t *testing.T) {
 	addr, _ := startTestDaemon(t, dir)
 
 	_, _, _, err := beam.DialBeam(addr, "wrong-token", proto.ClientTLSConfig(true))
-	assert.Error(t, err)
-	// The error may be "authentication failed" or "connection closed during handshake"
-	// depending on timing.
-	assert.True(t,
-		errors.Is(err, nil) == false,
-		"expected error from wrong token, got nil")
+	assert.Error(t, err, "expected error from wrong token, got nil")
+}
+
+// makeUniqueContent creates a byte slice where each block has unique content.
+func makeUniqueContent(size int) []byte {
+	data := make([]byte, size)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	return data
+}
+
+func TestBeamReadEndpointComputeSignature(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	content := makeUniqueContent(102400)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "data.bin"), content, 0o644))
+
+	readEP, _ := dialTestEndpoints(t, dir)
+
+	sig, err := readEP.ComputeSignature("data.bin", int64(len(content)))
+	require.NoError(t, err)
+	assert.Positive(t, sig.BlockSize)
+	assert.NotEmpty(t, sig.Blocks)
+}
+
+func TestBeamReadEndpointMatchBlocks(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	content := makeUniqueContent(102400)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "source.bin"), content, 0o644))
+
+	// Compute sigs of slightly different version.
+	modified := make([]byte, len(content))
+	copy(modified, content)
+	copy(modified[100:116], []byte("MODIFIED_BLOCK!!"))
+	modSig, err := transport.ComputeSignature(bytes.NewReader(modified), int64(len(modified)))
+	require.NoError(t, err)
+
+	readEP, _ := dialTestEndpoints(t, dir)
+
+	ops, err := readEP.MatchBlocks("source.bin", modSig)
+	require.NoError(t, err)
+	assert.NotEmpty(t, ops)
+
+	hasBlock := false
+	hasLiteral := false
+	for _, op := range ops {
+		if op.BlockIdx >= 0 {
+			hasBlock = true
+		} else {
+			hasLiteral = true
+		}
+	}
+	assert.True(t, hasBlock)
+	assert.True(t, hasLiteral)
+}
+
+func TestBeamWriteEndpointComputeSignature(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	content := makeUniqueContent(102400)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "data.bin"), content, 0o644))
+
+	_, writeEP := dialTestEndpoints(t, dir)
+
+	sig, err := writeEP.ComputeSignature("data.bin", int64(len(content)))
+	require.NoError(t, err)
+	assert.Positive(t, sig.BlockSize)
+	assert.NotEmpty(t, sig.Blocks)
+}
+
+func TestBeamWriteEndpointApplyDelta(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	// Create basis file.
+	basis := makeUniqueContent(102400)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "basis.bin"), basis, 0o644))
+
+	// Compute sigs of basis, match against modified version.
+	basisSig, err := transport.ComputeSignature(bytes.NewReader(basis), int64(len(basis)))
+	require.NoError(t, err)
+
+	modified := make([]byte, len(basis))
+	copy(modified, basis)
+	copy(modified[100:116], []byte("MODIFIED_BLOCK!!"))
+
+	ops, err := transport.MatchBlocks(bytes.NewReader(modified), basisSig)
+	require.NoError(t, err)
+
+	_, writeEP := dialTestEndpoints(t, dir)
+
+	// Create temp file.
+	wf, err := writeEP.CreateTemp("basis.bin", 0o644)
+	require.NoError(t, err)
+	require.NoError(t, wf.Close())
+	tmpName := wf.Name()
+
+	// Apply delta.
+	n, err := writeEP.ApplyDelta("basis.bin", tmpName, ops)
+	require.NoError(t, err)
+	assert.Equal(t, int64(len(modified)), n)
+
+	// Rename and verify.
+	require.NoError(t, writeEP.Rename(tmpName, "result.bin"))
+	result, err := os.ReadFile(filepath.Join(dir, "result.bin"))
+	require.NoError(t, err)
+	assert.Equal(t, modified, result)
 }

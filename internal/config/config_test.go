@@ -5,9 +5,10 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/bamsammich/beam/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bamsammich/beam/internal/config"
 )
 
 func TestLoad_MissingFile(t *testing.T) {
@@ -39,7 +40,10 @@ bwlimit = "100MB"
 green = "#00ff00"
 red = "#ff0000"
 `
-	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(content), 0o644))
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(content), 0o644),
+	)
 
 	cfg, err := config.Load()
 	require.NoError(t, err)
@@ -81,7 +85,10 @@ func TestLoad_PartialConfig(t *testing.T) {
 [theme]
 bright = "#ffffff"
 `
-	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(content), 0o644))
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(configDir, "config.toml"), []byte(content), 0o644),
+	)
 
 	cfg, err := config.Load()
 	require.NoError(t, err)
@@ -101,13 +108,16 @@ func TestLoad_InvalidTOML(t *testing.T) {
 	configDir := filepath.Join(dir, "beam")
 	require.NoError(t, os.MkdirAll(configDir, 0o755))
 
-	require.NoError(t, os.WriteFile(filepath.Join(configDir, "config.toml"), []byte("invalid [[["), 0o644))
+	require.NoError(
+		t,
+		os.WriteFile(filepath.Join(configDir, "config.toml"), []byte("invalid [[["), 0o644),
+	)
 
 	_, err := config.Load()
 	assert.Error(t, err)
 }
 
-func TestConfigPath(t *testing.T) {
+func TestPath(t *testing.T) {
 	t.Setenv("XDG_CONFIG_HOME", "/custom/config")
-	assert.Equal(t, "/custom/config/beam/config.toml", config.ConfigPath())
+	assert.Equal(t, "/custom/config/beam/config.toml", config.Path())
 }

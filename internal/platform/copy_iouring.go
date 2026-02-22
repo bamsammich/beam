@@ -25,8 +25,6 @@ var iouringBufPool = sync.Pool{
 
 // io_uring constants.
 const (
-	ioringSetupCQSize = 1 << 3
-
 	ioringOpRead  = 22
 	ioringOpWrite = 23
 
@@ -97,26 +95,21 @@ type ioUringCQRingOffsets struct {
 
 // ring wraps the memory-mapped io_uring state.
 type ring struct {
-	fd        int
-	sqEntries uint32
-	cqEntries uint32
-
-	// SQ ring pointers (into mmap'd memory).
+	sqArray   unsafe.Pointer
+	cqMask    *uint32
+	cqes      unsafe.Pointer
 	sqHead    *uint32
 	sqTail    *uint32
 	sqMask    *uint32
-	sqArray   unsafe.Pointer
 	sqes      unsafe.Pointer
-	sqRingMem []byte
-
-	// CQ ring pointers.
 	cqHead    *uint32
 	cqTail    *uint32
-	cqMask    *uint32
-	cqes      unsafe.Pointer
+	sqRingMem []byte
 	cqRingMem []byte
-
-	sqesMem []byte
+	sqesMem   []byte
+	fd        int
+	sqEntries uint32
+	cqEntries uint32
 }
 
 // IOURingCopier wraps a raw io_uring ring for file copy operations.
@@ -131,6 +124,7 @@ func NewIOURingCopier(queueDepth uint) (*IOURingCopier, error) {
 		return nil, nil
 	}
 
+	//nolint:gosec // G115: queueDepth is a small io_uring queue size
 	r, err := setupRing(uint32(queueDepth))
 	if err != nil {
 		return nil, err
@@ -158,7 +152,9 @@ func (c *IOURingCopier) CopyFile(params CopyFileParams) (CopyResult, error) {
 	offset := params.SrcOffset
 	var totalWritten int64
 
+	//nolint:gosec // G115: fd values are small non-negative integers
 	srcRawFd := int32(srcFd.Fd())
+	//nolint:gosec // G115: fd values are small non-negative integers
 	dstRawFd := int32(params.DstFd.Fd())
 
 	for remaining > 0 {
@@ -167,14 +163,21 @@ func (c *IOURingCopier) CopyFile(params CopyFileParams) (CopyResult, error) {
 			toRead = remaining
 		}
 
-		bufp := iouringBufPool.Get().(*[]byte)
+		bufp, _ := iouringBufPool.Get().(*[]byte) //nolint:revive // unchecked-type-assertion: pool only stores *[]byte
 		buf := (*bufp)[:toRead]
 
 		// Read via io_uring.
+		//nolint:gosec // G115: offset is non-negative file offset
 		n, err := c.r.submitAndWait(ioringOpRead, srcRawFd, buf, uint64(offset))
 		if err != nil {
 			iouringBufPool.Put(bufp)
-			return CopyResult{BytesWritten: totalWritten, Method: IOURing}, fmt.Errorf("iouring read: %w", err)
+			return CopyResult{
+					BytesWritten: totalWritten,
+					Method:       IOURing,
+				}, fmt.Errorf(
+					"iouring read: %w",
+					err,
+				)
 		}
 		if n == 0 {
 			iouringBufPool.Put(bufp)
@@ -182,10 +185,17 @@ func (c *IOURingCopier) CopyFile(params CopyFileParams) (CopyResult, error) {
 		}
 
 		// Write via io_uring.
+		//nolint:gosec // G115: offset is non-negative file offset
 		w, err := c.r.submitAndWait(ioringOpWrite, dstRawFd, buf[:n], uint64(offset))
 		iouringBufPool.Put(bufp)
 		if err != nil {
-			return CopyResult{BytesWritten: totalWritten, Method: IOURing}, fmt.Errorf("iouring write: %w", err)
+			return CopyResult{
+					BytesWritten: totalWritten,
+					Method:       IOURing,
+				}, fmt.Errorf(
+					"iouring write: %w",
+					err,
+				)
 		}
 
 		offset += int64(w)
@@ -220,7 +230,7 @@ func setupRing(entries uint32) (*ring, error) {
 	}
 
 	r := &ring{
-		fd:        int(fd),
+		fd:        int(fd), //nolint:gosec // G115: fd conversion is safe for file descriptors
 		sqEntries: params.sqEntries,
 		cqEntries: params.cqEntries,
 	}
@@ -236,11 +246,17 @@ func setupRing(entries uint32) (*ring, error) {
 const sqeSize = 64
 const cqeSize = 16
 
+//nolint:gosec // G115: mmap size conversions from kernel-provided uint32 values; bounded by queue depth
 func (r *ring) mmap(params *ioUringParams) error {
 	// Map submission queue ring.
 	sqRingSize := uintptr(params.sqOff.array) + uintptr(params.sqEntries)*4
-	sqMem, err := syscall.Mmap(r.fd, 0, int(sqRingSize),
-		syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED|syscall.MAP_POPULATE)
+	sqMem, err := syscall.Mmap(
+		r.fd,
+		0,
+		int(sqRingSize),
+		syscall.PROT_READ|syscall.PROT_WRITE,
+		syscall.MAP_SHARED|syscall.MAP_POPULATE,
+	)
 	if err != nil {
 		return fmt.Errorf("mmap sq ring: %w", err)
 	}
@@ -253,10 +269,14 @@ func (r *ring) mmap(params *ioUringParams) error {
 	r.sqArray = unsafe.Add(base, params.sqOff.array)
 
 	// Map SQEs.
-	sqesMem, err := syscall.Mmap(r.fd, 0x10000000, int(uintptr(params.sqEntries)*sqeSize),
-		syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED|syscall.MAP_POPULATE)
+	sqesSize := int(uintptr(params.sqEntries) * sqeSize)
+	sqesMem, err := syscall.Mmap(
+		r.fd, 0x10000000, sqesSize,
+		syscall.PROT_READ|syscall.PROT_WRITE,
+		syscall.MAP_SHARED|syscall.MAP_POPULATE,
+	)
 	if err != nil {
-		_ = syscall.Munmap(r.sqRingMem)
+		syscall.Munmap(r.sqRingMem) //nolint:errcheck // best-effort cleanup of mmap
 		return fmt.Errorf("mmap sqes: %w", err)
 	}
 	r.sqesMem = sqesMem
@@ -264,11 +284,16 @@ func (r *ring) mmap(params *ioUringParams) error {
 
 	// Map completion queue ring.
 	cqRingSize := uintptr(params.cqOff.cqes) + uintptr(params.cqEntries)*cqeSize
-	cqMem, err := syscall.Mmap(r.fd, 0x8000000, int(cqRingSize),
-		syscall.PROT_READ|syscall.PROT_WRITE, syscall.MAP_SHARED|syscall.MAP_POPULATE)
+	cqMem, err := syscall.Mmap(
+		r.fd,
+		0x8000000,
+		int(cqRingSize),
+		syscall.PROT_READ|syscall.PROT_WRITE,
+		syscall.MAP_SHARED|syscall.MAP_POPULATE,
+	)
 	if err != nil {
-		_ = syscall.Munmap(r.sqesMem)
-		_ = syscall.Munmap(r.sqRingMem)
+		syscall.Munmap(r.sqesMem)   //nolint:errcheck // best-effort cleanup of mmap
+		syscall.Munmap(r.sqRingMem) //nolint:errcheck // best-effort cleanup of mmap
 		return fmt.Errorf("mmap cq ring: %w", err)
 	}
 	r.cqRingMem = cqMem
@@ -284,28 +309,27 @@ func (r *ring) mmap(params *ioUringParams) error {
 
 func (r *ring) close() error {
 	var firstErr error
-	if r.cqRingMem != nil {
-		if err := syscall.Munmap(r.cqRingMem); err != nil && firstErr == nil {
+	setErr := func(err error) {
+		if err != nil && firstErr == nil {
 			firstErr = err
 		}
+	}
+	if r.cqRingMem != nil {
+		setErr(syscall.Munmap(r.cqRingMem))
 	}
 	if r.sqesMem != nil {
-		if err := syscall.Munmap(r.sqesMem); err != nil && firstErr == nil {
-			firstErr = err
-		}
+		setErr(syscall.Munmap(r.sqesMem))
 	}
 	if r.sqRingMem != nil {
-		if err := syscall.Munmap(r.sqRingMem); err != nil && firstErr == nil {
-			firstErr = err
-		}
+		setErr(syscall.Munmap(r.sqRingMem))
 	}
-	if err := syscall.Close(r.fd); err != nil && firstErr == nil {
-		firstErr = err
-	}
+	setErr(syscall.Close(r.fd))
 	return firstErr
 }
 
 // submitAndWait submits a single SQE and waits for its CQE.
+//
+//nolint:gosec // G115: io_uring SQE fields require int→uint32 and pointer→uint64 conversions
 func (r *ring) submitAndWait(op uint8, fd int32, buf []byte, offset uint64) (int, error) {
 	// Get next SQE slot.
 	tail := *r.sqTail
@@ -323,7 +347,7 @@ func (r *ring) submitAndWait(op uint8, fd int32, buf []byte, offset uint64) (int
 
 	// Write SQ array entry (index into SQEs array).
 	sqArr := (*uint32)(unsafe.Add(r.sqArray, uintptr(idx)*4))
-	*sqArr = uint32(idx)
+	*sqArr = idx
 
 	// Advance SQ tail.
 	*r.sqTail = tail + 1
@@ -331,10 +355,10 @@ func (r *ring) submitAndWait(op uint8, fd int32, buf []byte, offset uint64) (int
 	// Submit and wait via io_uring_enter.
 	_, _, errno := syscall.Syscall6(
 		unix.SYS_IO_URING_ENTER,
-		uintptr(r.fd),
-		1, // to_submit
-		1, // min_complete
-		uintptr(ioringEnterGetevents),
+		uintptr(r.fd),                 //nolint:gosec // G115: fd is a valid file descriptor
+		1,                             // to_submit
+		1,                             // min_complete
+		uintptr(ioringEnterGetevents), //nolint:gosec // G115: small constant flag value
 		0, 0,
 	)
 	if errno != 0 {
@@ -374,7 +398,10 @@ func kernelSupportsIOURing() bool {
 	}
 
 	minorStr := parts[1]
-	if idx := strings.IndexFunc(minorStr, func(r rune) bool { return r < '0' || r > '9' }); idx > 0 {
+	if idx := strings.IndexFunc(
+		minorStr,
+		func(r rune) bool { return r < '0' || r > '9' },
+	); idx > 0 {
 		minorStr = minorStr[:idx]
 	}
 	minor, err := strconv.Atoi(minorStr)

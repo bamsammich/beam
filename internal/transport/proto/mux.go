@@ -17,17 +17,14 @@ type StreamHandler func(streamID uint32, ch <-chan Frame)
 // A single reader goroutine dispatches incoming frames to per-stream channels.
 // A single writer goroutine serializes outgoing frames to the connection.
 type Mux struct {
-	conn net.Conn
-
-	writeCh chan Frame // outgoing frames serialized by writer goroutine
-
+	conn    net.Conn
+	err     error
+	writeCh chan Frame
+	streams map[uint32]chan Frame
+	handler StreamHandler
+	done    chan struct{}
 	mu      sync.Mutex
-	streams map[uint32]chan Frame // stream ID → incoming frame channel
 	closed  bool
-	handler StreamHandler // called for frames on unregistered streams
-
-	done chan struct{} // closed when Run exits
-	err  error        // first error from reader or writer
 }
 
 // NewMux creates a new multiplexer wrapping the given connection.
@@ -101,19 +98,15 @@ func (m *Mux) Run() error {
 	var wg sync.WaitGroup
 	errCh := make(chan error, 2)
 
-	wg.Add(2)
-
 	// Writer goroutine: drain writeCh, serialize to conn.
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		errCh <- m.writeLoop()
-	}()
+	})
 
 	// Reader goroutine: read frames, dispatch to stream channels.
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		errCh <- m.readLoop()
-	}()
+	})
 
 	// Wait for first error from either loop.
 	m.err = <-errCh

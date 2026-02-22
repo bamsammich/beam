@@ -1,8 +1,9 @@
 package tui
 
 import (
-	"github.com/bamsammich/beam/internal/config"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/bamsammich/beam/internal/config"
 )
 
 // Catppuccin Mocha palette — mutable so config can override.
