@@ -11,36 +11,35 @@ import (
 )
 
 type inFlightEntry struct {
+	started  time.Time
 	path     string
 	workerID int
 	size     int64
-	started  time.Time
-	progress int64 // bytes copied so far
+	progress int64
 }
 
 type completedEntry struct {
 	path    string
+	errMsg  string
 	size    int64
-	speed   float64
 	skipped bool
 	failed  bool
-	errMsg  string
 }
 
 type errorEntry struct {
-	path string
-	size int64
-	err  string
 	time time.Time
+	path string
+	err  string
+	size int64
 }
 
 type feedView struct {
-	inFlight     map[int]*inFlightEntry // keyed by workerID
-	completed    []completedEntry       // unbounded history
-	errors       []errorEntry           // never evicted
+	inFlight     map[int]*inFlightEntry
 	dstRoot      string
-	scrollOffset int  // viewport offset into completed list
-	autoScroll   bool // follow new entries
+	completed    []completedEntry
+	errors       []errorEntry
+	scrollOffset int
+	autoScroll   bool
 }
 
 func newFeedView(dstRoot string) feedView {
@@ -142,7 +141,11 @@ func (f *feedView) scrollToBottom() {
 	f.autoScroll = true
 }
 
-func (f *feedView) view(width, height int, speed float64) string {
+//nolint:gocyclo,revive // cyclomatic: view renderer with many layout sections
+func (f *feedView) view(
+	width, height int,
+	speed float64,
+) string {
 	if width < 20 {
 		width = 20
 	}
@@ -230,7 +233,7 @@ func (f *feedView) view(width, height int, speed float64) string {
 	return b.String()
 }
 
-func (f *feedView) renderInFlight(width, maxLines int) string {
+func (f *feedView) renderInFlight(_, maxLines int) string {
 	if len(f.inFlight) == 0 {
 		return ""
 	}
@@ -263,7 +266,7 @@ func (f *feedView) renderInFlight(width, maxLines int) string {
 	return b.String()
 }
 
-func (f *feedView) renderCompletedViewport(width, viewportHeight int, speed float64) string {
+func (f *feedView) renderCompletedViewport(_, viewportHeight int, speed float64) string {
 	if len(f.completed) == 0 {
 		return ""
 	}
@@ -307,7 +310,7 @@ func (f *feedView) renderCompletedViewport(width, viewportHeight int, speed floa
 	return b.String()
 }
 
-func (f *feedView) renderErrors(width, maxLines int) string {
+func (f *feedView) renderErrors(_, maxLines int) string {
 	if len(f.errors) == 0 {
 		return ""
 	}

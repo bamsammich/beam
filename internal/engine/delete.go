@@ -14,13 +14,13 @@ import (
 
 // DeleteConfig controls the delete pass.
 type DeleteConfig struct {
-	SrcRoot     string
-	DstRoot     string
-	Filter      *filter.Chain
-	DryRun      bool
 	Events      chan<- event.Event
 	SrcEndpoint transport.ReadEndpoint
 	DstEndpoint transport.WriteEndpoint
+	Filter      *filter.Chain
+	SrcRoot     string
+	DstRoot     string
+	DryRun      bool
 }
 
 func (c DeleteConfig) emit(e event.Event) {
@@ -37,6 +37,8 @@ func (c DeleteConfig) emit(e event.Event) {
 // DeleteExtraneous removes files/directories from DstRoot that don't exist
 // in SrcRoot. Returns the number of items deleted and any error.
 // SrcEndpoint and DstEndpoint must be set by the caller.
+//
+//nolint:revive // cognitive-complexity: inherently sequential walk-filter-delete logic
 func DeleteExtraneous(ctx context.Context, cfg DeleteConfig) (int, error) {
 	var toDelete []string
 	var dirsToDelete []string

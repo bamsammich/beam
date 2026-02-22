@@ -24,9 +24,9 @@ const (
 
 // Frame is a single protocol message on the wire.
 type Frame struct {
+	Payload  []byte
 	StreamID uint32
 	MsgType  byte
-	Payload  []byte
 }
 
 // ErrFrameTooLarge is returned when a frame exceeds MaxFrameSize.
@@ -35,8 +35,10 @@ var ErrFrameTooLarge = errors.New("frame exceeds maximum size")
 // WriteFrame writes a length-prefixed frame to w.
 // Wire format: [4-byte length (big-endian)][4-byte stream ID][1-byte msg type][payload]
 // The length field includes the header (stream ID + msg type) and payload.
+//
+//nolint:gosec // G115: payload length bounded by MaxFrameSize check
 func WriteFrame(w io.Writer, f Frame) error {
-	totalLen := uint32(4 + 1 + len(f.Payload)) // stream ID + msg type + payload
+	totalLen := uint32(4 + 1 + len(f.Payload))
 	if totalLen+4 > MaxFrameSize {
 		return ErrFrameTooLarge
 	}

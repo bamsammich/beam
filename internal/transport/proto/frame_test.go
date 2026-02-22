@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/bamsammich/beam/internal/transport/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bamsammich/beam/internal/transport/proto"
 )
 
 func TestFrameRoundTrip(t *testing.T) {

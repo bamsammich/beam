@@ -27,8 +27,8 @@ type BlockSignature struct {
 
 // Signature holds the block-level signature of a basis file.
 type Signature struct {
-	BlockSize int
 	Blocks    []BlockSignature
+	BlockSize int
 	FileSize  int64
 }
 
@@ -36,10 +36,10 @@ type Signature struct {
 // If BlockIdx >= 0, copy that block from the basis file.
 // Otherwise, Literal contains new data.
 type DeltaOp struct {
-	BlockIdx int    // -1 = literal data, >= 0 = copy from basis
-	Offset   int64  // offset in basis file (for block ops)
-	Length   int    // length of block or literal
 	Literal  []byte // non-nil only for literal ops
+	Offset   int64  // offset in basis file (for block ops)
+	BlockIdx int    // -1 = literal data, >= 0 = copy from basis
+	Length   int    // length of block or literal
 }
 
 // ChooseBlockSize selects an appropriate block size for a file.
@@ -57,6 +57,8 @@ func ChooseBlockSize(fileSize int64) int {
 
 // ComputeSignature reads the entire basis file and produces a Signature
 // with weak (xxHash) and strong (BLAKE3) hashes per block.
+//
+//nolint:revive // cognitive-complexity: block-by-block hashing with EOF handling
 func ComputeSignature(r io.Reader, fileSize int64) (Signature, error) {
 	blockSize := ChooseBlockSize(fileSize)
 	sig := Signature{
@@ -98,6 +100,8 @@ func ComputeSignature(r io.Reader, fileSize int64) (Signature, error) {
 // MatchBlocks reads the source file and matches it against the basis
 // signature, producing a list of DeltaOps. Matching blocks reference
 // the basis file; non-matching regions become literal data.
+//
+//nolint:gocyclo,revive // cyclomatic: rsync-style rolling hash block matching is inherently complex
 func MatchBlocks(src io.Reader, sig Signature) ([]DeltaOp, error) {
 	if len(sig.Blocks) == 0 {
 		// No basis blocks — entire file is literal.
@@ -114,7 +118,7 @@ func MatchBlocks(src io.Reader, sig Signature) ([]DeltaOp, error) {
 	// Build weak hash → block index lookup.
 	// Multiple blocks can share a weak hash; store all candidates.
 	type candidate struct {
-		index int
+		index  int
 		strong [32]byte
 		offset int64
 	}
@@ -188,6 +192,8 @@ func MatchBlocks(src io.Reader, sig Signature) ([]DeltaOp, error) {
 }
 
 // ApplyDelta reconstructs a file by applying DeltaOps against a basis file.
+//
+//nolint:revive // cognitive-complexity: delta application with basis seek and literal writes
 func ApplyDelta(basis io.ReadSeeker, ops []DeltaOp, dst io.Writer) error {
 	for _, op := range ops {
 		if op.BlockIdx >= 0 {
@@ -223,4 +229,3 @@ func DeltaStats(ops []DeltaOp) (matchedBlocks int, literalBytes int64) {
 	}
 	return matchedBlocks, literalBytes
 }
-

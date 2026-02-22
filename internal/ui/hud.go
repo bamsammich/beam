@@ -20,20 +20,18 @@ const (
 // hudPresenter provides a rich TTY display with a scrolling feed of completed
 // files and a 2-line HUD that redraws in place.
 type hudPresenter struct {
-	w         io.Writer
-	stats     stats.ReadTicker
-	forceFeed bool
-	forceRate bool
-	workers   int
-	dstRoot   string // destination root, stripped from displayed paths
-
-	// Internal state.
-	hudDrawn     bool
-	hudLineCount int // actual number of lines in the last HUD draw
-	rateMode     bool
-	rateSwitched bool // whether we've printed the switch notice
-	busyWorkers  map[int]bool
 	lastHUDDraw  time.Time
+	w            io.Writer
+	stats        stats.ReadTicker
+	busyWorkers  map[int]bool
+	dstRoot      string
+	workers      int
+	hudLineCount int
+	forceFeed    bool
+	forceRate    bool
+	hudDrawn     bool
+	rateMode     bool
+	rateSwitched bool
 }
 
 const (
@@ -85,7 +83,9 @@ func (p *hudPresenter) Run(events <-chan Event) error {
 	}
 }
 
-func (p *hudPresenter) handleEvent(ev Event) {
+func (p *hudPresenter) handleEvent( //nolint:revive // cyclomatic,cognitive-complexity: event handler with many event types
+	ev Event,
+) {
 	switch ev.Type {
 	case FileStarted:
 		p.busyWorkers[ev.WorkerID] = true
@@ -163,7 +163,7 @@ func (p *hudPresenter) printFileSkipped(ev Event) {
 		p.styledPath(ev.Path), FormatBytes(ev.Size), ansiDim, ansiReset)
 }
 
-func (p *hudPresenter) maybeSwitch() {
+func (p *hudPresenter) maybeSwitch() { //nolint:revive // cognitive-complexity: threshold switch logic
 	if p.forceFeed || p.forceRate {
 		return
 	}
@@ -175,8 +175,11 @@ func (p *hudPresenter) maybeSwitch() {
 		if !p.rateSwitched {
 			p.rateSwitched = true
 			p.clearHUD()
-			fmt.Fprintf(p.w, "\u21af rate view (%s files/s \u00b7 use --feed to see individual files)\n",
-				FormatCount(int64(fps)))
+			fmt.Fprintf(
+				p.w,
+				"\u21af rate view (%s files/s \u00b7 use --feed to see individual files)\n",
+				FormatCount(int64(fps)),
+			)
 		}
 	} else if p.rateMode && fps < rateThreshLow {
 		p.rateMode = false

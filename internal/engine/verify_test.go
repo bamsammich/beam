@@ -6,12 +6,13 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/filter"
 	"github.com/bamsammich/beam/internal/stats"
 	"github.com/bamsammich/beam/internal/transport"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 func TestVerify_MatchingFiles(t *testing.T) {

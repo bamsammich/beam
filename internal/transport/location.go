@@ -13,12 +13,12 @@ const DefaultBeamPort = 7223
 
 // Location represents a parsed source or destination argument.
 type Location struct {
-	Scheme string // "beam" for beam://, empty for local or SSH
-	Host   string // empty for local
-	User   string // empty = current user
-	Port   int    // 0 = default (22 for SSH, 7223 for beam)
-	Path   string // absolute or relative path
-	Token  string // beam:// auth token (from URL userinfo)
+	Scheme string
+	Host   string
+	User   string
+	Path   string
+	Token  string
+	Port   int
 }
 
 // IsRemote returns true if the location refers to a remote host.
@@ -67,6 +67,8 @@ func (l Location) String() string {
 // Ambiguity rule: a bare "word" with no colon is always local. A path
 // containing ":" is only treated as remote if the part before the colon
 // contains no path separators (so "/foo:bar" and "./host:path" are local).
+//
+//nolint:revive // cognitive-complexity: location parsing handles multiple format variants
 func ParseLocation(arg string) Location {
 	// Check for beam:// URL scheme first.
 	if strings.HasPrefix(arg, "beam://") {

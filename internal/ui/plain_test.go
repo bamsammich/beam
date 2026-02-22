@@ -5,9 +5,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/stats"
-	"github.com/stretchr/testify/assert"
 )
 
 func TestPlainPresenterFileCompleted(t *testing.T) {
@@ -23,7 +25,7 @@ func TestPlainPresenterFileCompleted(t *testing.T) {
 	close(events)
 
 	err := p.Run(events)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
 	assert.Len(t, lines, 2)
@@ -43,7 +45,7 @@ func TestPlainPresenterFileFailed(t *testing.T) {
 	close(events)
 
 	err := p.Run(events)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	assert.Contains(t, out.String(), "fail.txt")
 	assert.Contains(t, out.String(), assert.AnError.Error())
@@ -61,7 +63,7 @@ func TestPlainPresenterFileSkipped(t *testing.T) {
 	close(events)
 
 	err := p.Run(events)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	assert.Contains(t, out.String(), "skip.txt")
 	assert.Contains(t, out.String(), "skipped")
@@ -79,7 +81,7 @@ func TestPlainPresenterDeleteFile(t *testing.T) {
 	close(events)
 
 	err := p.Run(events)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	assert.Contains(t, out.String(), "delete: extra.txt")
 }
@@ -96,7 +98,7 @@ func TestPlainPresenterVerifyStarted(t *testing.T) {
 	close(events)
 
 	err := p.Run(events)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Contains(t, out.String(), "verifying...")
 }
 
@@ -112,7 +114,7 @@ func TestPlainPresenterVerifyFailed(t *testing.T) {
 	close(events)
 
 	err := p.Run(events)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Contains(t, out.String(), "MISMATCH: bad/file.txt")
 }
 

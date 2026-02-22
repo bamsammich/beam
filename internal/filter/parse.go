@@ -10,10 +10,12 @@ import (
 // LoadFile reads filter rules from a file and adds them to the chain.
 // Format:
 //   - pattern  → exclude
-//   + pattern  → include
-//   # comment  → skip
-//   blank line → skip
-//   no prefix  → exclude (rsync default)
+//   - pattern  → include
+//     # comment  → skip
+//     blank line → skip
+//     no prefix  → exclude (rsync default)
+//
+//nolint:revive // cognitive-complexity: sequential parsing logic
 func (c *Chain) LoadFile(path string) error {
 	f, err := os.Open(path)
 	if err != nil {

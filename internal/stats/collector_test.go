@@ -59,15 +59,15 @@ func TestSnapshotString(t *testing.T) {
 
 func TestFormatBytes(t *testing.T) {
 	tests := []struct {
-		input    int64
 		expected string
+		input    int64
 	}{
-		{0, "0 B"},
-		{512, "512 B"},
-		{1024, "1.0 KiB"},
-		{1536, "1.5 KiB"},
-		{1048576, "1.0 MiB"},
-		{1073741824, "1.0 GiB"},
+		{expected: "0 B", input: 0},
+		{expected: "512 B", input: 512},
+		{expected: "1.0 KiB", input: 1024},
+		{expected: "1.5 KiB", input: 1536},
+		{expected: "1.0 MiB", input: 1048576},
+		{expected: "1.0 GiB", input: 1073741824},
 	}
 	for _, tt := range tests {
 		t.Run(tt.expected, func(t *testing.T) {
@@ -124,7 +124,7 @@ func TestRollingSpeedPartialWindow(t *testing.T) {
 
 func TestRollingSpeedNoSamples(t *testing.T) {
 	c := NewCollector()
-	assert.Equal(t, 0.0, c.RollingSpeed(5))
+	assert.InDelta(t, 0.0, c.RollingSpeed(5), 0.001)
 }
 
 func TestSparklineData(t *testing.T) {

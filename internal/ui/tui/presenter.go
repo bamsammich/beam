@@ -13,12 +13,12 @@ import (
 
 // Config configures the TUI presenter.
 type Config struct {
+	Theme       config.ThemeConfig
 	Stats       stats.ReadTicker
-	Workers     int
+	WorkerLimit *atomic.Int32
 	DstRoot     string
 	SrcRoot     string
-	Theme       config.ThemeConfig
-	WorkerLimit *atomic.Int32
+	Workers     int
 }
 
 // Presenter wraps a Bubble Tea program and implements ui.Presenter.
@@ -35,7 +35,14 @@ func NewPresenter(cfg Config) *Presenter {
 
 // Run starts the Bubble Tea program and blocks until done.
 func (p *Presenter) Run(events <-chan event.Event) error {
-	p.model = NewModel(events, p.cfg.Stats, p.cfg.Workers, p.cfg.DstRoot, p.cfg.SrcRoot, p.cfg.WorkerLimit)
+	p.model = NewModel(
+		events,
+		p.cfg.Stats,
+		p.cfg.Workers,
+		p.cfg.DstRoot,
+		p.cfg.SrcRoot,
+		p.cfg.WorkerLimit,
+	)
 	prog := tea.NewProgram(
 		p.model,
 		tea.WithAltScreen(),
@@ -45,7 +52,7 @@ func (p *Presenter) Run(events <-chan event.Event) error {
 	if err != nil {
 		return err
 	}
-	p.model = finalModel.(Model)
+	p.model, _ = finalModel.(Model) //nolint:revive // unchecked-type-assertion: Bubble Tea always returns our Model type
 	return nil
 }
 

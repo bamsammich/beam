@@ -6,9 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bamsammich/beam/internal/transport/proto"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/bamsammich/beam/internal/transport/proto"
 )
 
 func TestDaemonHandshakeSuccess(t *testing.T) {
@@ -26,7 +27,7 @@ func TestDaemonHandshakeSuccess(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go daemon.Serve(ctx)
+	go daemon.Serve(ctx) //nolint:errcheck // test daemon; error not needed
 
 	// Connect as client.
 	addr := daemon.Addr().String()
@@ -37,7 +38,7 @@ func TestDaemonHandshakeSuccess(t *testing.T) {
 	mux := proto.NewMux(conn)
 	controlCh := mux.OpenStream(proto.ControlStream)
 
-	go mux.Run()
+	go mux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
 
 	// Send handshake.
 	req := proto.HandshakeReq{
@@ -86,7 +87,7 @@ func TestDaemonHandshakeWrongToken(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go daemon.Serve(ctx)
+	go daemon.Serve(ctx) //nolint:errcheck // test daemon; error not needed
 
 	// Connect with wrong token.
 	addr := daemon.Addr().String()
@@ -97,7 +98,7 @@ func TestDaemonHandshakeWrongToken(t *testing.T) {
 	mux := proto.NewMux(conn)
 	controlCh := mux.OpenStream(proto.ControlStream)
 
-	go mux.Run()
+	go mux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
 
 	// Send handshake with wrong token.
 	req := proto.HandshakeReq{
@@ -141,8 +142,8 @@ func TestDaemonRequiresConfig(t *testing.T) {
 	t.Parallel()
 
 	_, err := proto.NewDaemon(proto.DaemonConfig{})
-	assert.Error(t, err)
+	require.Error(t, err)
 
 	_, err = proto.NewDaemon(proto.DaemonConfig{Root: "/tmp"})
-	assert.Error(t, err)
+	require.Error(t, err)
 }

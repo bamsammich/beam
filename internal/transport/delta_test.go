@@ -16,10 +16,10 @@ func TestChooseBlockSize(t *testing.T) {
 		wantMin  int
 		wantMax  int
 	}{
-		{100, 512, 512},          // clamped to min
-		{256 * 1024, 512, 1024},  // sqrt(256K) ~= 512
-		{1024 * 1024, 512, 1200}, // sqrt(1M) ~= 1024
-		{1 << 30, 32000, 33000},  // sqrt(1G) ~= 32768
+		{100, 512, 512},           // clamped to min
+		{256 * 1024, 512, 1024},   // sqrt(256K) ~= 512
+		{1024 * 1024, 512, 1200},  // sqrt(1M) ~= 1024
+		{1 << 30, 32000, 33000},   // sqrt(1G) ~= 32768
 		{1 << 40, 131072, 131072}, // clamped to max
 	}
 
@@ -36,13 +36,13 @@ func TestDelta_IdenticalFiles(t *testing.T) {
 
 	sig, err := ComputeSignature(bytes.NewReader(data), int64(len(data)))
 	require.NoError(t, err)
-	assert.Greater(t, len(sig.Blocks), 0)
+	assert.NotEmpty(t, sig.Blocks)
 
 	ops, err := MatchBlocks(bytes.NewReader(data), sig)
 	require.NoError(t, err)
 
 	matched, literal := DeltaStats(ops)
-	assert.Greater(t, matched, 0)
+	assert.Positive(t, matched)
 	assert.Equal(t, int64(0), literal)
 
 	// Reconstruct and verify.
@@ -94,8 +94,8 @@ func TestDelta_PartialMatch(t *testing.T) {
 	require.NoError(t, err)
 
 	matched, literal := DeltaStats(ops)
-	assert.Greater(t, matched, 0, "should have some matching blocks")
-	assert.Greater(t, literal, int64(0), "should have some literal data")
+	assert.Positive(t, matched, "should have some matching blocks")
+	assert.Positive(t, literal, "should have some literal data")
 	assert.Less(t, literal, int64(len(source)), "should not be all literal")
 
 	// Reconstruct and verify.
@@ -132,8 +132,8 @@ func TestDelta_SourceLargerThanBasis(t *testing.T) {
 	require.NoError(t, err)
 
 	matched, literal := DeltaStats(ops)
-	assert.Greater(t, matched, 0, "basis portion should match")
-	assert.Greater(t, literal, int64(0), "extra portion is literal")
+	assert.Positive(t, matched, "basis portion should match")
+	assert.Positive(t, literal, "extra portion is literal")
 
 	// Reconstruct and verify.
 	var out bytes.Buffer
@@ -165,7 +165,13 @@ func TestDelta_Roundtrip_Large(t *testing.T) {
 	assert.Equal(t, source, out.Bytes())
 
 	matched, literal := DeltaStats(ops)
-	t.Logf("blockSize=%d blocks=%d matched=%d literal=%d", blockSize, len(sig.Blocks), matched, literal)
+	t.Logf(
+		"blockSize=%d blocks=%d matched=%d literal=%d",
+		blockSize,
+		len(sig.Blocks),
+		matched,
+		literal,
+	)
 	assert.Greater(t, matched, 1, "most blocks should match")
 }
 

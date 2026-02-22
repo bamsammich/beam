@@ -1,6 +1,7 @@
 package filter
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -9,10 +10,12 @@ import (
 // ParseSize parses a human-readable size string into bytes.
 // Supports: 100, 100B, 100K, 100M, 100G, 100T (case-insensitive).
 // Uses powers of 1024 (matching rsync behavior).
+//
+//nolint:revive // cyclomatic: suffix switch + integer/float fallback — irreducible for size parser
 func ParseSize(s string) (int64, error) {
 	s = strings.TrimSpace(s)
 	if s == "" {
-		return 0, fmt.Errorf("empty size string")
+		return 0, errors.New("empty size string")
 	}
 
 	// Determine the multiplier suffix.

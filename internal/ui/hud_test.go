@@ -3,12 +3,13 @@ package ui
 import (
 	"bytes"
 	"fmt"
-	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/stats"
-	"github.com/stretchr/testify/assert"
 )
 
 func TestHudPresenterFileCompleted(t *testing.T) {
@@ -30,7 +31,7 @@ func TestHudPresenterFileCompleted(t *testing.T) {
 	close(events)
 
 	err := p.Run(events)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	// Should contain the checkmark and file path.
 	assert.Contains(t, out.String(), "file.txt")
@@ -56,7 +57,7 @@ func TestHudPresenterFileCompletedStyledPath(t *testing.T) {
 	close(events)
 
 	err := p.Run(events)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	output := out.String()
 	// Directory should be dimmed (ANSI dim code present).
@@ -85,7 +86,7 @@ func TestHudPresenterRelativePaths(t *testing.T) {
 	close(events)
 
 	err := p.Run(events)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	output := out.String()
 	// Should NOT contain the absolute path root.
@@ -177,7 +178,7 @@ func TestHudClearHUDSequence(t *testing.T) {
 	out.Reset()
 	p.clearHUD()
 	// Should contain ANSI escape for cursor up.
-	assert.True(t, strings.Contains(out.String(), "\033["))
+	assert.Contains(t, out.String(), "\033[")
 	assert.False(t, p.hudDrawn)
 }
 
@@ -221,7 +222,7 @@ func TestHudAlwaysRedrawsAfterFeedLine(t *testing.T) {
 	close(events)
 
 	err := p.Run(events)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	output := out.String()
 	// Both files should appear.
@@ -249,7 +250,7 @@ func TestHudPresenterVerifyStarted(t *testing.T) {
 	close(events)
 
 	err := p.Run(events)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	assert.Contains(t, out.String(), "verifying checksums...")
 }
 
@@ -271,7 +272,7 @@ func TestHudPresenterVerifyFailed(t *testing.T) {
 	close(events)
 
 	err := p.Run(events)
-	assert.NoError(t, err)
+	require.NoError(t, err)
 
 	output := out.String()
 	assert.Contains(t, output, "\u2717")
