@@ -535,3 +535,24 @@ Before implementing, familiarize yourself with:
 ### Next Up
 - **Phase 6d** — SSH beam auto-detection
   - Auto-detect beam on remote: try `beam --server` over SSH, fall back to SFTP
+
+### Known Issues
+
+- **`--bwlimit` has no effect on local copies.** The kernel fast paths (`copy_file_range`, `sendfile`) bypass userspace entirely, so the `rate.Limiter` wrapping `io.Reader`/`io.Writer` is never hit. Fix: when `--bwlimit` is set, skip the kernel fast path and fall back to the userspace read/write loop where the limiter lives. Should also emit a warning if bwlimit is requested but the fast path was used.
+- **VHS demo GIFs need re-recording.** The current inline and TUI demo GIFs complete too fast to show the HUD (progress bar, sparkline, worker grid). Re-record after bwlimit is fixed for local copies, or use a real network transfer between two machines.
+- **Network benchmarks missing from README.** The README benchmark section only covers local transfers (beam vs rsync). Add a network benchmark table (beam protocol vs rsync over SSH) once beam is deployed on a second machine.
+
+---
+
+## Wiki Maintenance
+
+The GitHub wiki lives at `github.com/bamsammich/beam.wiki` (clone via `ghq get github.com/bamsammich/beam.wiki`). When changes to beam affect CLI flags, transport behavior, TUI keybinds, filtering, architecture, or any other documented behavior, **update the corresponding wiki page(s)** to stay in sync:
+
+| Wiki Page | Update when... |
+|-----------|----------------|
+| CLI-Reference | Flags are added, removed, or have default changes |
+| Remote-Transfers | SFTP, beam protocol, delta transfer, or daemon behavior changes |
+| TUI-Guide | TUI keybinds, views, or theme changes |
+| Filtering-and-Delete | Filter syntax, size filter, or `--delete` behavior changes |
+| Architecture | Engine pipeline, transport interfaces, protocol wire format, or stats collector changes |
+| Home | Navigation links need updating (new pages added) |
