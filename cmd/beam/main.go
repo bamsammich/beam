@@ -86,7 +86,7 @@ func run() int {
 
 	rootCmd := &cobra.Command{
 		Use:   "beam [flags] <source>... <destination>",
-		Short: "Insanely fast file transfer tool",
+		Short: "Fast, parallel file copy with delta sync and a beautiful CLI",
 		Args: func(cmd *cobra.Command, args []string) error {
 			if showVersion {
 				return nil
