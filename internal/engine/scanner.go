@@ -261,7 +261,7 @@ func (s *Scanner) processRegular(
 	sparseCapable := s.cfg.SrcEndpoint.Caps().SparseDetect
 	hardlinkCapable := s.cfg.SrcEndpoint.Caps().Hardlinks
 
-	devino := DevIno{Dev: stat.Dev, Ino: stat.Ino}
+	devino := DevIno{Dev: devFromStat(stat), Ino: stat.Ino}
 	if hardlinkCapable && stat.Nlink > 1 {
 		if firstPath, seen := s.inodeSeen.LoadOrStore(devino, srcPath); seen {
 			s.sendTask(FileTask{
@@ -430,8 +430,4 @@ func splitIntoChunks(fileSize, chunkSize int64) []Chunk {
 		offset += length
 	}
 	return chunks
-}
-
-func atimeFromStat(stat *syscall.Stat_t) time.Time {
-	return time.Unix(stat.Atim.Sec, stat.Atim.Nsec)
 }

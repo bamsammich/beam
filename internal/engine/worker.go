@@ -765,20 +765,14 @@ func (wp *WorkerPool) setFileMetadataLocal(task FileTask, fd *os.File) error {
 	// Always preserve mtime so skip detection (size + mtime) works on re-runs.
 	// In archive mode, also preserve atime. --no-times disables both.
 	if !wp.cfg.NoTimes {
-		atime := unix.Timespec{Nsec: unix.UTIME_OMIT}
-		if wp.cfg.PreserveTimes {
-			atime = unix.NsecToTimespec(task.AccTime.UnixNano())
-		}
-		times := []unix.Timespec{
-			atime,
-			unix.NsecToTimespec(task.ModTime.UnixNano()),
-		}
-		if err := unix.UtimesNanoAt(rawFd, "", times, unix.AT_EMPTY_PATH); err != nil {
-			// Fallback: some systems don't support AT_EMPTY_PATH.
-			path := fd.Name()
-			if err2 := unix.UtimesNanoAt(unix.AT_FDCWD, path, times, 0); err2 != nil {
-				return fmt.Errorf("utimensat: %w", err)
-			}
+		if err := setFileTimes(
+			rawFd,
+			fd.Name(),
+			task.AccTime,
+			task.ModTime,
+			wp.cfg.PreserveTimes,
+		); err != nil {
+			return err
 		}
 	}
 
