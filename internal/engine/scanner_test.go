@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/bamsammich/beam/internal/filter"
+	"github.com/bamsammich/beam/internal/transport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -22,9 +23,11 @@ func TestScanner_FlatDir(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(src, "b.txt"), []byte("B"), 0644))
 
 	cfg := ScannerConfig{
-		SrcRoot: src,
-		DstRoot: dst,
-		Workers: 2,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		Workers:     2,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -69,9 +72,11 @@ func TestScanner_NestedDirs(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(src, "sub1", "sub2", "s2.txt"), []byte("s2"), 0644))
 
 	cfg := ScannerConfig{
-		SrcRoot: src,
-		DstRoot: dst,
-		Workers: 2,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		Workers:     2,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -133,9 +138,11 @@ func TestScanner_Symlink(t *testing.T) {
 	require.NoError(t, os.Symlink("target.txt", filepath.Join(src, "link")))
 
 	cfg := ScannerConfig{
-		SrcRoot: src,
-		DstRoot: dst,
-		Workers: 1,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		Workers:     1,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -182,9 +189,11 @@ func TestScanner_Hardlink(t *testing.T) {
 	require.NoError(t, os.Link(original, hardlink))
 
 	cfg := ScannerConfig{
-		SrcRoot: src,
-		DstRoot: dst,
-		Workers: 1,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		Workers:     1,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -235,6 +244,8 @@ func TestScanner_LargeFileChunking(t *testing.T) {
 		DstRoot:        dst,
 		Workers:        1,
 		ChunkThreshold: 4 * 1024 * 1024, // 4 MiB
+		SrcEndpoint:    transport.NewLocalReadEndpoint(src),
+		DstEndpoint:    transport.NewLocalWriteEndpoint(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -289,6 +300,8 @@ func TestScanner_SparseDetection(t *testing.T) {
 		DstRoot:      dst,
 		Workers:      1,
 		SparseDetect: true,
+		SrcEndpoint:  transport.NewLocalReadEndpoint(src),
+		DstEndpoint:  transport.NewLocalWriteEndpoint(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -328,9 +341,11 @@ func TestScanner_ContextCancel(t *testing.T) {
 	}
 
 	cfg := ScannerConfig{
-		SrcRoot: src,
-		DstRoot: dst,
-		Workers: 2,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		Workers:     2,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -368,9 +383,11 @@ func TestScanner_PermissionDenied(t *testing.T) {
 	defer os.Chmod(subdir, 0755) // cleanup
 
 	cfg := ScannerConfig{
-		SrcRoot: src,
-		DstRoot: dst,
-		Workers: 1,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		Workers:     1,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -410,10 +427,12 @@ func TestScanner_ExcludeFilter(t *testing.T) {
 	require.NoError(t, chain.AddExclude("*.log"))
 
 	cfg := ScannerConfig{
-		SrcRoot: src,
-		DstRoot: dst,
-		Workers: 1,
-		Filter:  chain,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		Workers:     1,
+		Filter:      chain,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -450,10 +469,12 @@ func TestScanner_DirExcludeSkipsRecursion(t *testing.T) {
 	require.NoError(t, chain.AddExclude("build/"))
 
 	cfg := ScannerConfig{
-		SrcRoot: src,
-		DstRoot: dst,
-		Workers: 1,
-		Filter:  chain,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		Workers:     1,
+		Filter:      chain,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -491,10 +512,12 @@ func TestScanner_IncludeOverride(t *testing.T) {
 	require.NoError(t, chain.AddExclude("*.log"))
 
 	cfg := ScannerConfig{
-		SrcRoot: src,
-		DstRoot: dst,
-		Workers: 1,
-		Filter:  chain,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		Workers:     1,
+		Filter:      chain,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	}
 
 	scanner := NewScanner(cfg)

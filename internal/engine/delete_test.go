@@ -8,6 +8,7 @@ import (
 
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/filter"
+	"github.com/bamsammich/beam/internal/transport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -29,8 +30,10 @@ func TestDeleteExtraneous_OverlappingTrees(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dst, "extra.txt"), []byte("extra"), 0644))
 
 	deleted, err := DeleteExtraneous(context.Background(), DeleteConfig{
-		SrcRoot: src,
-		DstRoot: dst,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	})
 
 	require.NoError(t, err)
@@ -59,8 +62,10 @@ func TestDeleteExtraneous_NonOverlapping(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dst, "delete_me.txt"), []byte("d"), 0644))
 
 	deleted, err := DeleteExtraneous(context.Background(), DeleteConfig{
-		SrcRoot: src,
-		DstRoot: dst,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	})
 
 	require.NoError(t, err)
@@ -80,9 +85,11 @@ func TestDeleteExtraneous_DryRun(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dst, "extra.txt"), []byte("extra"), 0644))
 
 	deleted, err := DeleteExtraneous(context.Background(), DeleteConfig{
-		SrcRoot: src,
-		DstRoot: dst,
-		DryRun:  true,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		DryRun:      true,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	})
 
 	require.NoError(t, err)
@@ -111,9 +118,11 @@ func TestDeleteExtraneous_FilterInteraction(t *testing.T) {
 	require.NoError(t, chain.AddExclude("*.log"))
 
 	deleted, err := DeleteExtraneous(context.Background(), DeleteConfig{
-		SrcRoot: src,
-		DstRoot: dst,
-		Filter:  chain,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		Filter:      chain,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	})
 
 	require.NoError(t, err)
@@ -140,8 +149,10 @@ func TestDeleteExtraneous_NestedEmptyDirs(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dst, "old", "deep", "nested", "file.txt"), []byte("x"), 0644))
 
 	deleted, err := DeleteExtraneous(context.Background(), DeleteConfig{
-		SrcRoot: src,
-		DstRoot: dst,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	})
 
 	require.NoError(t, err)
@@ -164,9 +175,11 @@ func TestDeleteExtraneous_EmitsEvents(t *testing.T) {
 	events := make(chan event.Event, 10)
 
 	deleted, err := DeleteExtraneous(context.Background(), DeleteConfig{
-		SrcRoot: src,
-		DstRoot: dst,
-		Events:  events,
+		SrcRoot:     src,
+		DstRoot:     dst,
+		Events:      events,
+		SrcEndpoint: transport.NewLocalReadEndpoint(src),
+		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
 	})
 
 	require.NoError(t, err)

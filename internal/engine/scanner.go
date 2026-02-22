@@ -14,6 +14,7 @@ import (
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/filter"
 	"github.com/bamsammich/beam/internal/stats"
+	"github.com/bamsammich/beam/internal/transport"
 )
 
 // ScannerConfig controls scanner behavior.
@@ -28,6 +29,8 @@ type ScannerConfig struct {
 	Events         chan<- event.Event
 	Filter         *filter.Chain
 	Stats          stats.Writer // if set, skipped-file stats are recorded directly
+	SrcEndpoint    transport.ReadEndpoint  // nil = local filesystem
+	DstEndpoint    transport.WriteEndpoint // nil = local filesystem
 }
 
 // Scanner traverses a directory tree in parallel and emits FileTask items.
@@ -41,6 +44,7 @@ type Scanner struct {
 }
 
 // NewScanner creates a scanner with the given config.
+// SrcEndpoint and DstEndpoint must be set by the caller.
 func NewScanner(cfg ScannerConfig) *Scanner {
 	if cfg.Workers <= 0 {
 		cfg.Workers = min(runtime.NumCPU(), 8)
@@ -196,74 +200,84 @@ func (s *Scanner) processEntry(ctx context.Context, srcPath, dstPath string, wor
 		return nil
 
 	case mode.IsRegular():
-		// Skip files where the destination already exists with matching
-		// size and mtime. The filesystem is the source of truth — no
-		// external database needed since beam uses atomic writes.
-		if dstInfo, err := os.Lstat(dstPath); err == nil {
-			if dstInfo.Size() == info.Size() && dstInfo.ModTime().Equal(info.ModTime()) {
-				relPath, _ := filepath.Rel(s.cfg.SrcRoot, srcPath)
-				s.emit(event.Event{Type: event.FileSkipped, Path: relPath, Size: info.Size()})
-				if s.cfg.Stats != nil {
-					s.cfg.Stats.AddFilesSkipped(1)
-					s.cfg.Stats.AddBytesCopied(info.Size())
-				}
-				return nil
-			}
-		}
-
-		devino := DevIno{Dev: stat.Dev, Ino: stat.Ino}
-		if stat.Nlink > 1 {
-			if firstPath, seen := s.inodeSeen.LoadOrStore(devino, srcPath); seen {
-				s.sendTask(FileTask{
-					SrcPath:    srcPath,
-					DstPath:    dstPath,
-					Type:       Hardlink,
-					LinkTarget: firstPath.(string),
-					DevIno:     devino,
-				})
-				return nil
-			}
-		}
-
-		var segments []Segment
-		if s.cfg.SparseDetect && info.Size() > 0 {
-			fd, err := os.Open(srcPath)
-			if err != nil {
-				return fmt.Errorf("open %s for sparse detection: %w", srcPath, err)
-			}
-			segments, err = DetectSparseSegments(fd, info.Size())
-			fd.Close()
-			if err != nil {
-				return fmt.Errorf("detect sparse %s: %w", srcPath, err)
-			}
-		}
-
-		var chunks []Chunk
-		if s.cfg.ChunkThreshold > 0 && info.Size() > s.cfg.ChunkThreshold {
-			chunks = splitIntoChunks(info.Size(), s.cfg.ChunkThreshold)
-		}
-
-		s.totalFiles.Add(1)
-		s.totalBytes.Add(info.Size())
-		s.sendTask(FileTask{
-			SrcPath:  srcPath,
-			DstPath:  dstPath,
-			Type:     Regular,
-			Size:     info.Size(),
-			Mode:     uint32(mode),
-			Uid:      stat.Uid,
-			Gid:      stat.Gid,
-			ModTime:  info.ModTime(),
-			AccTime:  atimeFromStat(stat),
-			DevIno:   devino,
-			Segments: segments,
-			Chunks:   chunks,
-		})
-		return nil
+		return s.processRegular(srcPath, dstPath, info, stat)
 
 	default:
 		return nil
 	}
+}
+
+func (s *Scanner) processRegular(srcPath, dstPath string, info os.FileInfo, stat *syscall.Stat_t) error {
+	mode := info.Mode()
+
+	// Skip files where the destination already exists with matching
+	// size and mtime.
+	relDst, _ := filepath.Rel(s.cfg.DstRoot, dstPath)
+	if dstEntry, err := s.cfg.DstEndpoint.Stat(relDst); err == nil {
+		if dstEntry.Size == info.Size() && dstEntry.ModTime.Equal(info.ModTime()) {
+			relPath, _ := filepath.Rel(s.cfg.SrcRoot, srcPath)
+			s.emit(event.Event{Type: event.FileSkipped, Path: relPath, Size: info.Size()})
+			if s.cfg.Stats != nil {
+				s.cfg.Stats.AddFilesSkipped(1)
+				s.cfg.Stats.AddBytesCopied(info.Size())
+			}
+			return nil
+		}
+	}
+
+	// Hardlink detection: only when capabilities support it.
+	sparseCapable := s.cfg.SrcEndpoint.Caps().SparseDetect
+	hardlinkCapable := s.cfg.SrcEndpoint.Caps().Hardlinks
+
+	devino := DevIno{Dev: stat.Dev, Ino: stat.Ino}
+	if hardlinkCapable && stat.Nlink > 1 {
+		if firstPath, seen := s.inodeSeen.LoadOrStore(devino, srcPath); seen {
+			s.sendTask(FileTask{
+				SrcPath:    srcPath,
+				DstPath:    dstPath,
+				Type:       Hardlink,
+				LinkTarget: firstPath.(string),
+				DevIno:     devino,
+			})
+			return nil
+		}
+	}
+
+	var segments []Segment
+	if s.cfg.SparseDetect && sparseCapable && info.Size() > 0 {
+		fd, err := os.Open(srcPath)
+		if err != nil {
+			return fmt.Errorf("open %s for sparse detection: %w", srcPath, err)
+		}
+		segments, err = DetectSparseSegments(fd, info.Size())
+		fd.Close()
+		if err != nil {
+			return fmt.Errorf("detect sparse %s: %w", srcPath, err)
+		}
+	}
+
+	var chunks []Chunk
+	if s.cfg.ChunkThreshold > 0 && info.Size() > s.cfg.ChunkThreshold {
+		chunks = splitIntoChunks(info.Size(), s.cfg.ChunkThreshold)
+	}
+
+	s.totalFiles.Add(1)
+	s.totalBytes.Add(info.Size())
+	s.sendTask(FileTask{
+		SrcPath:  srcPath,
+		DstPath:  dstPath,
+		Type:     Regular,
+		Size:     info.Size(),
+		Mode:     uint32(mode),
+		Uid:      stat.Uid,
+		Gid:      stat.Gid,
+		ModTime:  info.ModTime(),
+		AccTime:  atimeFromStat(stat),
+		DevIno:   devino,
+		Segments: segments,
+		Chunks:   chunks,
+	})
+	return nil
 }
 
 func (s *Scanner) sendTask(task FileTask) {
