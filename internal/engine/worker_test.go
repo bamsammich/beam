@@ -9,12 +9,13 @@ import (
 	"time"
 
 	"github.com/bamsammich/beam/internal/stats"
+	"github.com/bamsammich/beam/internal/transport"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
 )
 
-func newTestWorkerPool(t *testing.T, opts ...func(*WorkerConfig)) (*WorkerPool, *stats.Collector) {
+func newTestWorkerPool(t *testing.T, dstRoot string, opts ...func(*WorkerConfig)) (*WorkerPool, *stats.Collector) {
 	t.Helper()
 	s := &stats.Collector{}
 	cfg := WorkerConfig{
@@ -22,6 +23,9 @@ func newTestWorkerPool(t *testing.T, opts ...func(*WorkerConfig)) (*WorkerPool, 
 		PreserveMode:  true,
 		PreserveTimes: true,
 		Stats:         s,
+		DstRoot:       dstRoot,
+		SrcEndpoint:   transport.NewLocalReadEndpoint("/"),
+		DstEndpoint:   transport.NewLocalWriteEndpoint(dstRoot),
 	}
 	for _, o := range opts {
 		o(&cfg)
@@ -44,7 +48,7 @@ func TestWorker_SingleFileCopy(t *testing.T) {
 	require.NoError(t, os.WriteFile(srcFile, data, 0644))
 	dstFile := filepath.Join(dst, "file.txt")
 
-	wp, s := newTestWorkerPool(t)
+	wp, s := newTestWorkerPool(t, dst)
 
 	tasks := make(chan FileTask, 1)
 	errs := make(chan error, 1)
@@ -97,7 +101,7 @@ func TestWorker_AtomicWrite(t *testing.T) {
 	dstFile := filepath.Join(dst, "file.txt")
 	require.NoError(t, os.WriteFile(dstFile, []byte("old content"), 0644))
 
-	wp, _ := newTestWorkerPool(t)
+	wp, _ := newTestWorkerPool(t, dst)
 
 	info, _ := os.Stat(srcFile)
 	stat := info.Sys().(*syscall.Stat_t)
@@ -168,7 +172,7 @@ func TestWorker_SparseFileCopy(t *testing.T) {
 
 	dstFile := filepath.Join(dst, "sparse.bin")
 
-	wp, _ := newTestWorkerPool(t)
+	wp, _ := newTestWorkerPool(t, dst)
 	tasks := make(chan FileTask, 1)
 	errs := make(chan error, 1)
 	tasks <- FileTask{
@@ -201,9 +205,10 @@ func TestWorker_SparseFileCopy(t *testing.T) {
 
 func TestWorker_DirectoryCreation(t *testing.T) {
 	dir := t.TempDir()
-	dst := filepath.Join(dir, "dst", "sub1", "sub2")
+	dstRoot := filepath.Join(dir, "dst")
+	dst := filepath.Join(dstRoot, "sub1", "sub2")
 
-	wp, s := newTestWorkerPool(t)
+	wp, s := newTestWorkerPool(t, dstRoot)
 	tasks := make(chan FileTask, 1)
 	errs := make(chan error, 1)
 	tasks <- FileTask{
@@ -233,7 +238,7 @@ func TestWorker_SymlinkCreation(t *testing.T) {
 
 	linkPath := filepath.Join(dst, "link")
 
-	wp, s := newTestWorkerPool(t)
+	wp, s := newTestWorkerPool(t, dst)
 	tasks := make(chan FileTask, 1)
 	errs := make(chan error, 1)
 	tasks <- FileTask{
@@ -272,7 +277,7 @@ func TestWorker_HardlinkCreation(t *testing.T) {
 	srcHardlink := filepath.Join(src, "hardlink.txt")
 	dstHardlink := filepath.Join(dst, "hardlink.txt")
 
-	wp, s := newTestWorkerPool(t)
+	wp, s := newTestWorkerPool(t, dst)
 	tasks := make(chan FileTask, 1)
 	errs := make(chan error, 1)
 	tasks <- FileTask{
@@ -308,7 +313,7 @@ func TestWorker_HardlinkCreation(t *testing.T) {
 func TestWorker_DryRun(t *testing.T) {
 	dir := t.TempDir()
 
-	wp, s := newTestWorkerPool(t, func(cfg *WorkerConfig) {
+	wp, s := newTestWorkerPool(t, dir, func(cfg *WorkerConfig) {
 		cfg.DryRun = true
 	})
 
@@ -353,7 +358,7 @@ func TestWorker_MetadataPreservation(t *testing.T) {
 
 	dstFile := filepath.Join(dst, "file.txt")
 
-	wp, _ := newTestWorkerPool(t, func(cfg *WorkerConfig) {
+	wp, _ := newTestWorkerPool(t, dst, func(cfg *WorkerConfig) {
 		cfg.PreserveMode = true
 		cfg.PreserveTimes = true
 	})

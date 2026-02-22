@@ -5,7 +5,7 @@
 You are helping plan and implement `beam`, a modern file copy CLI tool written in Go. `beam` is designed to be:
 
 1. **Fast** — faster than `rsync` for local copies via parallel workers, kernel copy offload, and io_uring; competitive on network transfers via a custom binary protocol
-2. **Reliable** — atomic writes, optional post-copy checksum verification, resume/checkpoint support, and correct handling of edge cases (sparse files, hardlinks, xattrs)
+2. **Reliable** — atomic writes, optional post-copy checksum verification, mtime-based skip detection, and correct handling of edge cases (sparse files, hardlinks, xattrs)
 3. **Beautiful** — inline terminal output that feels at home alongside `curl`, `git clone`, and `cargo build`, with an optional full TUI (`--tui`) for large/long-running transfers
 
 The name is `beam`. The binary is `beam`. The GitHub org and module path should be `github.com/nicholasgasior/beam` or similar — settle on a path early and use it consistently throughout.
@@ -30,9 +30,8 @@ The name is `beam`. The binary is `beam`. The GitHub org and module path should 
 | TUI styling | Lip Gloss (`github.com/charmbracelet/lipgloss`) | Pairs with Bubble Tea, expressive styling primitives |
 | CLI parsing | `github.com/spf13/cobra` | Familiar, composable, good flag UX |
 | Checksums | BLAKE3 (`github.com/zeebo/blake3`) | Faster than MD5/SHA, parallelizable, correct |
-| Rolling hash (delta) | xxHash + custom rolling | Faster than Adler-32 used by rsync |
-| SSH transport | `golang.org/x/crypto/ssh` | Standard, well-maintained |
-| Database (resume) | `modernc.org/sqlite` (pure Go, no CGO) | Resume checkpoints, no external dependency |
+| Rolling hash (delta) | xxHash (`github.com/cespare/xxhash/v2`) | Faster than Adler-32 used by rsync |
+| SSH transport | `golang.org/x/crypto/ssh` + `github.com/pkg/sftp` | Standard, well-maintained |
 | Testing | stdlib `testing` + `testify` | Standard Go idioms |
 
 ---
@@ -47,11 +46,11 @@ cmd/beam/
 
 internal/
   engine/
+    engine.go              — orchestrator, wires endpoints into components
     scanner.go             — parallel directory walker, emits FileTask
     worker.go              — copy worker pool, consumes FileTask
-    delta.go               — rsync-style rolling checksum / block matching
     verify.go              — post-copy BLAKE3 verification pass
-    checkpoint.go          — SQLite-backed resume state
+    delete.go              — extraneous file deletion pass
     sparse.go              — sparse file detection via SEEK_DATA/SEEK_HOLE
 
   platform/
@@ -60,9 +59,13 @@ internal/
     copy_fallback.go       — read/write with large aligned buffers
 
   transport/
-    local.go               — local filesystem transport
-    sftp.go                — SSH/SFTP transport
-    protocol.go            — custom binary protocol (when both ends are beam)
+    transport.go           — ReadEndpoint / WriteEndpoint interfaces, FileEntry
+    local.go               — local filesystem endpoints (LocalReadEndpoint, LocalWriteEndpoint)
+    sftp.go                — SSH/SFTP endpoints (SFTPReadEndpoint, SFTPWriteEndpoint)
+    ssh.go                 — SSH connection management (DialSSH, auth chain)
+    delta.go               — rsync-style block matching delta transfer
+    location.go            — user@host:path location parsing
+    protocol.go            — custom binary protocol (future: when both ends are beam)
 
   ui/
     inline.go              — inline progress: ANSI HUD, feed mode, rate mode
@@ -138,9 +141,9 @@ When source and destination are remote and `--delta` is set (on by default for n
 3. Block size is chosen dynamically: `sqrt(filesize)` clamped to [512B, 128KB], not rsync's fixed 700B
 4. Strong hash for block verification: BLAKE3 (not MD4 like rsync)
 
-### Resume / Checkpoint
+### Skip Detection
 
-On startup, beam writes a checkpoint record to a SQLite DB at `$XDG_RUNTIME_DIR/beam/<job-id>.db` (or `/tmp/beam-<job-id>.db`). Each completed file's path and BLAKE3 hash are recorded. On re-invocation with the same source/destination pair, already-completed files are skipped. `--no-resume` disables this. DB is deleted on clean completion.
+beam uses mtime-based skip detection: if a destination file exists with the same size and modification time as the source, the file is skipped. This is the same heuristic rsync uses by default and avoids the overhead of a persistent checkpoint database.
 
 ---
 
@@ -352,7 +355,7 @@ A background goroutine samples `BytesCopied` once per second, computes the delta
 ## Testing Strategy
 
 ### Unit Tests
-- `engine/delta_test.go` — verify delta algorithm produces correct output for known inputs; test block matching edge cases (all-same, all-different, partial match)
+- `transport/delta_test.go` — verify delta algorithm produces correct output for known inputs; test block matching edge cases (all-same, all-different, partial match)
 - `engine/worker_test.go` — test atomic write behavior, tmp file cleanup on error, sparse file reproduction
 - `filter/rules_test.go` — test include/exclude glob matching against rsync's behavior for compatibility
 - `platform/copy_test.go` — test fast path selection logic and fallback behavior
@@ -430,21 +433,31 @@ Build in this sequence. Each phase is independently useful:
    - `--delete` pass
    - `--dry-run` diff output
 
-4. **Phase 4 — Verify + resume**
+4. **Phase 4 — Verify + mtime skip**
    - Post-copy BLAKE3 verification pass
-   - SQLite checkpoint for resume
+   - Mtime-based skip detection (same size + modtime = skip)
 
-5. **Phase 5 — Full TUI**
+5. **Phase 5 — Full TUI + multi-source**
    - Bubble Tea model
    - Feed view, rate view, error panel
    - Keybinds, pause/resume, worker adjustment
+   - Multi-source support (`beam -a src1 src2 dst`)
+   - Config system, worker throttle
 
-6. **Phase 6 — Network / SSH transport**
-   - SFTP transport
-   - Delta transfer algorithm
-   - Custom binary protocol (both ends are beam)
+6. **Phase 6a — Transport abstraction + SFTP + push delta**
+   - `ReadEndpoint` / `WriteEndpoint` interfaces (`internal/transport`)
+   - Local and SFTP endpoint implementations
+   - Refactor scanner, worker, delete, verify to use endpoints
+   - SSH connection management with auth chain (agent → keys → password)
+   - `user@host:path` CLI syntax parsing
+   - Push-only delta transfer (xxHash + BLAKE3 block matching)
 
-7. **Phase 7 — Polish**
+7. **Phase 6b — Pull delta + custom protocol** (future)
+   - Pull (remote→local) delta transfer
+   - Custom binary protocol (when both ends are beam)
+   - Bidirectional delta negotiation
+
+8. **Phase 7 — Polish**
    - `--benchmark` mode
    - `--bwlimit` rate limiting (token bucket)
    - Structured JSON logging
@@ -492,6 +505,9 @@ Before implementing, familiarize yourself with:
 ### Completed
 - **Phase 1** — Core engine with local copy (PR #1)
 - **Phase 2+3** — Event system, inline UI, filtering, and delete (PR #2)
+- **Phase 4** — BLAKE3 post-copy verification, mtime-based skip detection (PR #3)
+- **Phase 5** — TUI overhaul, config system, worker throttle, multi-source support (PR #4, #5)
+- **Phase 6a** — Transport abstraction, SFTP endpoints, SSH auth, push-only delta transfer (in progress)
 
 ### Next Up
-- **Phase 4** — Verify + resume (BLAKE3 post-copy verification, SQLite checkpoint)
+- **Phase 6b** — Pull delta transfer, custom binary protocol (both ends are beam)
