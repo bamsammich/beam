@@ -34,7 +34,7 @@ type Daemon struct {
 // NewDaemon creates a new beam daemon. Call Serve to start accepting connections.
 func NewDaemon(cfg DaemonConfig) (*Daemon, error) {
 	if cfg.Root == "" {
-		return nil, errors.New("daemon root directory is required")
+		cfg.Root = "/"
 	}
 	if cfg.AuthToken == "" {
 		return nil, errors.New("daemon auth token is required")
