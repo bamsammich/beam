@@ -150,3 +150,37 @@ func FromDeltaOps(ops []transport.DeltaOp) []DeltaOpMsg {
 	}
 	return msgs
 }
+
+// FromBatchWriteRequest converts a transport.BatchWriteRequest to a wire WriteFileBatchReq.
+func FromBatchWriteRequest(req transport.BatchWriteRequest) WriteFileBatchReq {
+	entries := make([]WriteFileBatchEntry, len(req.Entries))
+	for i, e := range req.Entries {
+		entries[i] = WriteFileBatchEntry{
+			RelPath: e.RelPath,
+			Data:    e.Data,
+			ModTime: e.ModTime.UnixNano(),
+			AccTime: e.AccTime.UnixNano(),
+			Perm:    uint32(e.Perm),
+			Mode:    uint32(e.Mode),
+			UID:     e.UID,
+			GID:     e.GID,
+		}
+	}
+	return WriteFileBatchReq{
+		Entries: entries,
+		Opts:    FromMetadataOpts(req.Opts),
+	}
+}
+
+// ToBatchWriteResults converts wire WriteFileBatchResult slice to transport.BatchWriteResult slice.
+func ToBatchWriteResults(results []WriteFileBatchResult) []transport.BatchWriteResult {
+	out := make([]transport.BatchWriteResult, len(results))
+	for i, r := range results {
+		out[i] = transport.BatchWriteResult{
+			RelPath: r.RelPath,
+			Error:   r.Error,
+			OK:      r.OK,
+		}
+	}
+	return out
+}

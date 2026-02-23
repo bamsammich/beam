@@ -89,6 +89,23 @@ func dialTestSSH(t *testing.T, host string, port int) *ssh.Client {
 	return nil
 }
 
+// fixedConnector wraps a pre-created endpoint as a Connector for test use.
+type fixedConnector struct {
+	readEP  transport.ReadEndpoint
+	writeEP transport.WriteEndpoint
+}
+
+func (c *fixedConnector) ConnectRead(_ string) (transport.ReadEndpoint, error) {
+	return c.readEP, nil
+}
+
+func (c *fixedConnector) ConnectWrite(_ string) (transport.WriteEndpoint, error) {
+	return c.writeEP, nil
+}
+
+func (*fixedConnector) Protocol() transport.Protocol { return transport.ProtocolSFTP }
+func (*fixedConnector) Close() error                 { return nil }
+
 func TestIntegration_LocalToSFTP(t *testing.T) {
 	t.Parallel()
 
@@ -108,13 +125,14 @@ func TestIntegration_LocalToSFTP(t *testing.T) {
 	t.Cleanup(func() { dstEP.Close() })
 
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:     []string{srcDir + "/"},
-		Dst:         dstDir,
-		Archive:     true,
-		Recursive:   true,
-		Workers:     2,
-		Events:      drainEvents(t),
-		DstEndpoint: dstEP,
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Events:       drainEvents(t),
+		SrcConnector: transport.NewLocalConnector(),
+		DstConnector: &fixedConnector{writeEP: dstEP},
 	})
 
 	require.NoError(t, result.Err)
@@ -153,13 +171,14 @@ func TestIntegration_SFTPToLocal(t *testing.T) {
 	}
 
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:     []string{srcDir + "/"},
-		Dst:         dstDir,
-		Archive:     true,
-		Recursive:   true,
-		Workers:     2,
-		Events:      drainEvents(t),
-		SrcEndpoint: srcEP,
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Events:       drainEvents(t),
+		SrcConnector: &fixedConnector{readEP: srcEP},
+		DstConnector: transport.NewLocalConnector(),
 	})
 
 	require.NoError(t, result.Err)

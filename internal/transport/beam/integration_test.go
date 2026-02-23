@@ -260,9 +260,9 @@ func TestBeamEndToEndEngineIntegration(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
-	dstEP := beam.NewWriteEndpoint(dstMux, dstDir, dstDir, dstCaps)
+	dstConn := beam.NewConnectorFromMux(dstMux, dstDir, dstCaps)
 
-	// Use the engine to copy srcDir/dir/ → dstDir/ via beam endpoint.
+	// Use the engine to copy srcDir/dir/ → dstDir/ via beam connector.
 	ctx := context.Background()
 	events := make(chan event.Event, 256)
 
@@ -274,13 +274,14 @@ func TestBeamEndToEndEngineIntegration(t *testing.T) {
 	}()
 
 	result := engine.Run(ctx, engine.Config{
-		Sources:     []string{srcDir + "/dir/"},
-		Dst:         dstDir,
-		Recursive:   true,
-		Archive:     true,
-		Workers:     2,
-		Events:      events,
-		DstEndpoint: dstEP,
+		Sources:      []string{srcDir + "/dir/"},
+		Dst:          dstDir,
+		Recursive:    true,
+		Archive:      true,
+		Workers:      2,
+		Events:       events,
+		SrcConnector: transport.NewLocalConnector(),
+		DstConnector: dstConn,
 	})
 	close(events)
 

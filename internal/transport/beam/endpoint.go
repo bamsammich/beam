@@ -230,8 +230,11 @@ type ReadEndpoint struct {
 	nextStream atomic.Uint32
 }
 
-// Compile-time interface check.
-var _ transport.ReadEndpoint = (*ReadEndpoint)(nil)
+// Compile-time interface checks.
+var (
+	_ transport.ReadEndpoint = (*ReadEndpoint)(nil)
+	_ transport.DeltaSource  = (*ReadEndpoint)(nil)
+)
 
 // NewReadEndpoint creates a read endpoint from an established mux connection.
 // root is the client's target path (loc.Path), daemonRoot is the server's root.
@@ -555,8 +558,13 @@ type WriteEndpoint struct {
 	nextStream atomic.Uint32
 }
 
-// Compile-time interface check.
-var _ transport.WriteEndpoint = (*WriteEndpoint)(nil)
+// Compile-time interface checks.
+var (
+	_ transport.WriteEndpoint = (*WriteEndpoint)(nil)
+	_ transport.BatchWriter   = (*WriteEndpoint)(nil)
+	_ transport.DeltaTarget   = (*WriteEndpoint)(nil)
+	_ transport.SubtreeWalker = (*WriteEndpoint)(nil)
+)
 
 // NewWriteEndpoint creates a write endpoint from an established mux connection.
 // root is the client's target path (loc.Path), daemonRoot is the server's root.
@@ -979,21 +987,22 @@ func (e *WriteEndpoint) ApplyDelta(
 }
 
 // WriteFileBatch sends a batch of small files to the remote daemon in a single
-// round-trip. This is a beam-specific method (not on the transport.WriteEndpoint
-// interface), accessed via type assertion, same pattern as delta transfer.
+// round-trip. Implements transport.BatchWriter.
 func (e *WriteEndpoint) WriteFileBatch(
-	req proto.WriteFileBatchReq,
-) ([]proto.WriteFileBatchResult, error) {
+	req transport.BatchWriteRequest,
+) ([]transport.BatchWriteResult, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
 
+	wireReq := proto.FromBatchWriteRequest(req)
+
 	// Translate entry RelPaths to server-relative.
-	for i := range req.Entries {
-		req.Entries[i].RelPath = serverPath(e.pathPrefix, req.Entries[i].RelPath)
+	for i := range wireReq.Entries {
+		wireReq.Entries[i].RelPath = serverPath(e.pathPrefix, wireReq.Entries[i].RelPath)
 	}
 
-	payload, err := req.MarshalMsg(nil)
+	payload, err := wireReq.MarshalMsg(nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1015,7 +1024,7 @@ func (e *WriteEndpoint) WriteFileBatch(
 	if _, err := resp.UnmarshalMsg(f.Payload); err != nil {
 		return nil, err
 	}
-	return resp.Results, nil
+	return proto.ToBatchWriteResults(resp.Results), nil
 }
 
 func (e *WriteEndpoint) Root() string                 { return e.root }

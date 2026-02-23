@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/bamsammich/beam/internal/event"
+	"github.com/bamsammich/beam/internal/transport"
 	"github.com/bamsammich/beam/internal/transport/beam"
 	"github.com/bamsammich/beam/internal/transport/proto"
 )
@@ -132,45 +133,37 @@ func startTestDaemon(t *testing.T, root string) (addr, token string) {
 	return daemon.Addr().String(), token
 }
 
-// dialBeamReadEndpoint dials a beam daemon and returns a ReadEndpoint.
+// dialBeamConnector dials a beam daemon and returns a Connector.
 // The underlying mux is closed on test cleanup.
-func dialBeamReadEndpoint(t *testing.T, addr, token, root string) *beam.ReadEndpoint {
+//
+//nolint:ireturn // test helper returns Connector
+func dialBeamConnector(t *testing.T, addr, token, root string) transport.Connector {
 	t.Helper()
 
 	mux, _, caps, err := beam.DialBeam(addr, token, proto.ClientTLSConfig(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 
-	return beam.NewReadEndpoint(mux, root, root, caps)
+	return beam.NewConnectorFromMux(mux, root, caps)
 }
 
-// dialBeamReadEndpointCustomRoots dials a beam daemon and returns a
-// ReadEndpoint with explicit endpointRoot and daemonRoot. This allows tests
-// to simulate non-local source paths by constructing a pathPrefix that maps
-// a fictional client-side root to real data on the daemon.
-func dialBeamReadEndpointCustomRoots(
+// dialBeamConnectorCustomRoots dials a beam daemon and returns a Connector
+// with explicit daemonRoot. This allows tests to simulate non-local source
+// paths by constructing a pathPrefix that maps a fictional client-side root
+// to real data on the daemon.
+//
+//nolint:ireturn // test helper returns Connector
+func dialBeamConnectorCustomRoots(
 	t *testing.T,
-	addr, token, endpointRoot, daemonRoot string,
-) *beam.ReadEndpoint {
+	addr, token, daemonRoot string,
+) transport.Connector {
 	t.Helper()
 
 	mux, _, caps, err := beam.DialBeam(addr, token, proto.ClientTLSConfig(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 
-	return beam.NewReadEndpoint(mux, endpointRoot, daemonRoot, caps)
-}
-
-// dialBeamWriteEndpoint dials a beam daemon and returns a WriteEndpoint.
-// The underlying mux is closed on test cleanup.
-func dialBeamWriteEndpoint(t *testing.T, addr, token, root string) *beam.WriteEndpoint {
-	t.Helper()
-
-	mux, _, caps, err := beam.DialBeam(addr, token, proto.ClientTLSConfig(true))
-	require.NoError(t, err)
-	t.Cleanup(func() { mux.Close() })
-
-	return beam.NewWriteEndpoint(mux, root, root, caps)
+	return beam.NewConnectorFromMux(mux, daemonRoot, caps)
 }
 
 // createModifiedTestTree creates a test tree at root that is slightly

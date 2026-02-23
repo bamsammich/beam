@@ -176,12 +176,15 @@ func TestEngine_CopyWithVerify(t *testing.T) {
 	require.NoError(t, os.MkdirAll(src, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(src, "file.txt"), []byte("data"), 0644))
 
+	srcConn, dstConn := localConns()
 	result := Run(context.Background(), Config{
-		Sources:   []string{src},
-		Dst:       dst,
-		Recursive: true,
-		Workers:   2,
-		Verify:    true,
+		Sources:      []string{src},
+		Dst:          dst,
+		Recursive:    true,
+		Workers:      2,
+		Verify:       true,
+		SrcConnector: srcConn,
+		DstConnector: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -197,13 +200,16 @@ func TestEngine_VerifySkippedOnDryRun(t *testing.T) {
 	require.NoError(t, os.MkdirAll(src, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(src, "file.txt"), []byte("data"), 0644))
 
+	srcConn2, dstConn2 := localConns()
 	result := Run(context.Background(), Config{
-		Sources:   []string{src},
-		Dst:       dst,
-		Recursive: true,
-		Workers:   1,
-		Verify:    true,
-		DryRun:    true,
+		Sources:      []string{src},
+		Dst:          dst,
+		Recursive:    true,
+		Workers:      1,
+		Verify:       true,
+		DryRun:       true,
+		SrcConnector: srcConn2,
+		DstConnector: dstConn2,
 	})
 
 	require.NoError(t, result.Err)

@@ -6,6 +6,84 @@ import (
 	"time"
 )
 
+// Protocol identifies the transport protocol in use.
+type Protocol int
+
+const (
+	ProtocolLocal Protocol = iota
+	ProtocolSFTP
+	ProtocolBeam
+)
+
+// Connector abstracts connection establishment for all transport types.
+// Every parsed location resolves to a Connector — the engine calls
+// ConnectRead/ConnectWrite when it needs endpoints.
+//
+// Optional capabilities (BatchWriter, DeltaSource, DeltaTarget, SubtreeWalker,
+// PathResolver) are discovered via type assertion on the returned endpoint.
+// The endpoint's Caps() struct declares what it supports; the assertion
+// provides the typed method set.
+type Connector interface {
+	ConnectRead(path string) (ReadEndpoint, error)
+	ConnectWrite(path string) (WriteEndpoint, error)
+	Protocol() Protocol
+	Close() error
+}
+
+// BatchWriter is implemented by endpoints that support batched small-file writes.
+type BatchWriter interface {
+	WriteFileBatch(req BatchWriteRequest) ([]BatchWriteResult, error)
+}
+
+// DeltaSource is implemented by read endpoints that support server-side delta operations.
+type DeltaSource interface {
+	ComputeSignature(relPath string, fileSize int64) (Signature, error)
+	MatchBlocks(relPath string, sig Signature) ([]DeltaOp, error)
+}
+
+// DeltaTarget is implemented by write endpoints that support server-side delta operations.
+type DeltaTarget interface {
+	ComputeSignature(relPath string, fileSize int64) (Signature, error)
+	ApplyDelta(basisRelPath, tempRelPath string, ops []DeltaOp) (int64, error)
+}
+
+// SubtreeWalker is implemented by endpoints that support walking a subtree
+// relative to the endpoint root (e.g. for building destination indexes).
+type SubtreeWalker interface {
+	WalkSubtree(subDir string, fn func(entry FileEntry) error) error
+}
+
+// PathResolver is implemented by endpoints that can resolve a relative path
+// to an absolute filesystem path (local endpoints only).
+type PathResolver interface {
+	AbsPath(relPath string) string
+}
+
+// BatchWriteEntry describes a single file in a batch write request.
+type BatchWriteEntry struct {
+	ModTime time.Time
+	AccTime time.Time
+	RelPath string
+	Data    []byte
+	Perm    os.FileMode
+	Mode    os.FileMode
+	UID     uint32
+	GID     uint32
+}
+
+// BatchWriteRequest is a batch of small files to write atomically.
+type BatchWriteRequest struct {
+	Entries []BatchWriteEntry
+	Opts    MetadataOpts
+}
+
+// BatchWriteResult is the per-file result of a batch write.
+type BatchWriteResult struct {
+	RelPath string
+	Error   string
+	OK      bool
+}
+
 // FileEntry describes a single filesystem entry with full metadata.
 type FileEntry struct {
 	ModTime    time.Time

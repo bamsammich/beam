@@ -17,6 +17,8 @@ import (
 var (
 	_ ReadEndpoint  = (*LocalReadEndpoint)(nil)
 	_ WriteEndpoint = (*LocalWriteEndpoint)(nil)
+	_ PathResolver  = (*LocalReadEndpoint)(nil)
+	_ PathResolver  = (*LocalWriteEndpoint)(nil)
 )
 
 // LocalReadEndpoint reads from the local filesystem.

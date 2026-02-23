@@ -38,7 +38,7 @@ cmd/beam/
 
 internal/
   engine/
-    engine.go              — orchestrator, wires endpoints into components
+    engine.go              — orchestrator, wires connectors into components
     scanner.go             — parallel directory walker, emits FileTask
     worker.go              — copy worker pool, consumes FileTask
     batcher.go             — small-file batch accumulator for beam protocol
@@ -52,13 +52,15 @@ internal/
     copy_fallback.go       — read/write with large aligned buffers
 
   transport/
-    transport.go           — ReadEndpoint / WriteEndpoint interfaces, FileEntry, Capabilities
+    transport.go           — Connector, ReadEndpoint / WriteEndpoint interfaces, capability interfaces, FileEntry, Capabilities
+    connector.go           — LocalConnector (local filesystem connector)
     local.go               — local filesystem endpoints
-    sftp.go                — SSH/SFTP endpoints
+    sftp.go                — SSH/SFTP endpoints (with borrowed-connection support)
     ssh.go                 — SSH connection management
     delta.go               — rsync-style block matching delta transfer
     location.go            — user@host:path location parsing
     beam/
+      connector.go         — BeamConnector (direct beam://), SSHConnector (SSH with beam auto-detect + SFTP fallback)
       endpoint.go          — beam protocol ReadEndpoint + WriteEndpoint (incl. WriteFileBatch)
       discover.go          — SSH beam daemon auto-detection, tunnel, convenience wrappers
     proto/
@@ -101,6 +103,26 @@ internal/
 [Verify goroutine pool]
 ```
 
+### Connector Layer
+
+Every parsed location resolves to a `transport.Connector` — the engine accepts connectors (not pre-made endpoints) and calls `ConnectRead`/`ConnectWrite` when it needs endpoints:
+
+- `LocalConnector` — creates fresh local endpoints per call
+- `BeamConnector` — manages a direct `beam://` connection; caches endpoints (shared mux)
+- `SSHConnector` — dials SSH, auto-detects beam daemon, delegates to `BeamConnector` or SFTP fallback
+
+### Capability Interfaces
+
+Optional transport features are discovered via type assertion on endpoints (idiomatic Go optional interface pattern, like `io.WriterTo`):
+
+- `BatchWriter` — batched small-file writes (`WriteFileBatch`)
+- `DeltaSource` — server-side signature/block-matching (`ComputeSignature`, `MatchBlocks`)
+- `DeltaTarget` — server-side delta application (`ComputeSignature`, `ApplyDelta`)
+- `SubtreeWalker` — subtree walking relative to endpoint root (`WalkSubtree`)
+- `PathResolver` — resolve relative paths to absolute filesystem paths (`AbsPath`)
+
+The engine never type-asserts concrete endpoint types — only these capability interfaces.
+
 ### Protocol Backward Compatibility (STRICT)
 
 All beam protocol messages use msgpack map encoding (field names as string keys, NOT positional). New fields MUST be additive with zero-value defaults. Old clients MUST ignore unknown fields. Never remove or rename a field. This rule applies to all types in `internal/transport/proto/messages.go`.
@@ -126,7 +148,7 @@ Beam endpoints translate between client-relative and server-relative paths using
 - **Atomic writes**: Never write directly to the destination path. Always write to `<dest>.<uuid>.beam-tmp`, then `os.Rename`. Crash/ctrl-c never leaves a partial file.
 - **Delta transfer**: Uses xxHash rolling checksums + BLAKE3 strong hash. Block size: `sqrt(filesize)` clamped to [512B, 128KB]. On by default for network transports.
 - **Skip detection**: mtime + size match = skip (same as rsync default).
-- **Batch RPC is beam-specific**: Not on the `WriteEndpoint` interface. Accessed via type assertion, same pattern as delta transfer methods.
+- **Batch RPC**: Accessed via `transport.BatchWriter` capability interface type assertion on endpoints. Same pattern as `DeltaSource`/`DeltaTarget` for delta transfer.
 - **One failure doesn't abort a batch**: Server processes each entry independently, returns per-file OK/Error.
 
 ---
@@ -162,6 +184,7 @@ All initial phases are implemented:
 - **Batch RPC** — WriteFileBatchReq/Resp for small-file batching, TCP/mux optimizations
 - **Path fix + DstIndex** — Beam endpoint path translation, subtree Walk, pre-built destination index for skip detection
 - **Phase 6d** — SSH beam daemon auto-detection: reads `/etc/beam/daemon.toml` over SFTP, tunnels TLS connection to daemon through SSH, upgrades to beam protocol transparently; `--no-beam-ssh` flag to force SFTP
+- **Connector Factory** — Connector interface + capability interfaces (BatchWriter, DeltaSource, DeltaTarget, SubtreeWalker, PathResolver); BeamConnector, SSHConnector with auto-detect composition; engine decoupled from concrete endpoint types
 
 ### Known Issues
 

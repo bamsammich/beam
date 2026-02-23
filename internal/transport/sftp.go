@@ -28,7 +28,7 @@ type SFTPReadEndpoint struct {
 }
 
 // NewSFTPReadEndpoint creates a read endpoint backed by an SFTP connection.
-// The caller must call Close when done.
+// The endpoint owns both the SFTP and SSH clients — Close() closes both.
 func NewSFTPReadEndpoint(sshClient *ssh.Client, root string) (*SFTPReadEndpoint, error) {
 	sftpClient, err := sftp.NewClient(sshClient)
 	if err != nil {
@@ -37,6 +37,21 @@ func NewSFTPReadEndpoint(sshClient *ssh.Client, root string) (*SFTPReadEndpoint,
 	return &SFTPReadEndpoint{
 		client: sftpClient,
 		ssh:    sshClient,
+		root:   root,
+	}, nil
+}
+
+// NewSFTPReadEndpointBorrowed creates a read endpoint that borrows the SSH
+// connection. Close() only closes the SFTP client, not the SSH connection
+// (which is owned by the caller, e.g. SSHConnector).
+func NewSFTPReadEndpointBorrowed(sshClient *ssh.Client, root string) (*SFTPReadEndpoint, error) {
+	sftpClient, err := sftp.NewClient(sshClient)
+	if err != nil {
+		return nil, fmt.Errorf("sftp client: %w", err)
+	}
+	return &SFTPReadEndpoint{
+		client: sftpClient,
+		ssh:    nil, // not owned
 		root:   root,
 	}, nil
 }
@@ -134,8 +149,10 @@ func (*SFTPReadEndpoint) Caps() Capabilities {
 
 func (e *SFTPReadEndpoint) Close() error {
 	err := e.client.Close()
-	if sshErr := e.ssh.Close(); sshErr != nil && err == nil {
-		err = sshErr
+	if e.ssh != nil {
+		if sshErr := e.ssh.Close(); sshErr != nil && err == nil {
+			err = sshErr
+		}
 	}
 	return err
 }
@@ -148,7 +165,7 @@ type SFTPWriteEndpoint struct {
 }
 
 // NewSFTPWriteEndpoint creates a write endpoint backed by an SFTP connection.
-// The caller must call Close when done.
+// The endpoint owns both the SFTP and SSH clients — Close() closes both.
 func NewSFTPWriteEndpoint(sshClient *ssh.Client, root string) (*SFTPWriteEndpoint, error) {
 	sftpClient, err := sftp.NewClient(sshClient)
 	if err != nil {
@@ -157,6 +174,20 @@ func NewSFTPWriteEndpoint(sshClient *ssh.Client, root string) (*SFTPWriteEndpoin
 	return &SFTPWriteEndpoint{
 		client: sftpClient,
 		ssh:    sshClient,
+		root:   root,
+	}, nil
+}
+
+// NewSFTPWriteEndpointBorrowed creates a write endpoint that borrows the SSH
+// connection. Close() only closes the SFTP client, not the SSH connection.
+func NewSFTPWriteEndpointBorrowed(sshClient *ssh.Client, root string) (*SFTPWriteEndpoint, error) {
+	sftpClient, err := sftp.NewClient(sshClient)
+	if err != nil {
+		return nil, fmt.Errorf("sftp client: %w", err)
+	}
+	return &SFTPWriteEndpoint{
+		client: sftpClient,
+		ssh:    nil, // not owned
 		root:   root,
 	}, nil
 }
@@ -320,8 +351,10 @@ func (*SFTPWriteEndpoint) Caps() Capabilities {
 
 func (e *SFTPWriteEndpoint) Close() error {
 	err := e.client.Close()
-	if sshErr := e.ssh.Close(); sshErr != nil && err == nil {
-		err = sshErr
+	if e.ssh != nil {
+		if sshErr := e.ssh.Close(); sshErr != nil && err == nil {
+			err = sshErr
+		}
 	}
 	return err
 }
