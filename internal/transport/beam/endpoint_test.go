@@ -49,8 +49,8 @@ func dialTestEndpoints(
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 
-	readEP := beam.NewReadEndpoint(mux, root, caps)
-	writeEP := beam.NewWriteEndpoint(mux, root, caps)
+	readEP := beam.NewReadEndpoint(mux, root, root, caps)
+	writeEP := beam.NewWriteEndpoint(mux, root, root, caps)
 	return readEP, writeEP
 }
 

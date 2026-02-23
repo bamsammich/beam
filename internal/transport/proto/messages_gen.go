@@ -5354,6 +5354,12 @@ func (z *WalkReq) DecodeMsg(dc *msgp.Reader) (err error) {
 			return
 		}
 		switch msgp.UnsafeString(field) {
+		case "rel_path":
+			z.RelPath, err = dc.ReadString()
+			if err != nil {
+				err = msgp.WrapError(err, "RelPath")
+				return
+			}
 		default:
 			err = dc.Skip()
 			if err != nil {
@@ -5367,10 +5373,15 @@ func (z *WalkReq) DecodeMsg(dc *msgp.Reader) (err error) {
 
 // EncodeMsg implements msgp.Encodable
 func (z WalkReq) EncodeMsg(en *msgp.Writer) (err error) {
-	// map header, size 0
-	_ = z
-	err = en.Append(0x80)
+	// map header, size 1
+	// write "rel_path"
+	err = en.Append(0x81, 0xa8, 0x72, 0x65, 0x6c, 0x5f, 0x70, 0x61, 0x74, 0x68)
 	if err != nil {
+		return
+	}
+	err = en.WriteString(z.RelPath)
+	if err != nil {
+		err = msgp.WrapError(err, "RelPath")
 		return
 	}
 	return
@@ -5379,9 +5390,10 @@ func (z WalkReq) EncodeMsg(en *msgp.Writer) (err error) {
 // MarshalMsg implements msgp.Marshaler
 func (z WalkReq) MarshalMsg(b []byte) (o []byte, err error) {
 	o = msgp.Require(b, z.Msgsize())
-	// map header, size 0
-	_ = z
-	o = append(o, 0x80)
+	// map header, size 1
+	// string "rel_path"
+	o = append(o, 0x81, 0xa8, 0x72, 0x65, 0x6c, 0x5f, 0x70, 0x61, 0x74, 0x68)
+	o = msgp.AppendString(o, z.RelPath)
 	return
 }
 
@@ -5403,6 +5415,12 @@ func (z *WalkReq) UnmarshalMsg(bts []byte) (o []byte, err error) {
 			return
 		}
 		switch msgp.UnsafeString(field) {
+		case "rel_path":
+			z.RelPath, bts, err = msgp.ReadStringBytes(bts)
+			if err != nil {
+				err = msgp.WrapError(err, "RelPath")
+				return
+			}
 		default:
 			bts, err = msgp.Skip(bts)
 			if err != nil {
@@ -5417,7 +5435,7 @@ func (z *WalkReq) UnmarshalMsg(bts []byte) (o []byte, err error) {
 
 // Msgsize returns an upper bound estimate of the number of bytes occupied by the serialized message
 func (z WalkReq) Msgsize() (s int) {
-	s = 1
+	s = 1 + 9 + msgp.StringPrefixSize + len(z.RelPath)
 	return
 }
 

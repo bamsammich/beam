@@ -65,8 +65,8 @@ func TestBeamToBeamTransfer(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
-	srcEP := beam.NewReadEndpoint(srcMux, srcDir, srcCaps)
-	dstEP := beam.NewWriteEndpoint(dstMux, dstDir, dstCaps)
+	srcEP := beam.NewReadEndpoint(srcMux, srcDir, srcDir, srcCaps)
+	dstEP := beam.NewWriteEndpoint(dstMux, dstDir, dstDir, dstCaps)
 
 	// --- Walk source, replicate to dest ---
 	var entries []transport.FileEntry
@@ -156,7 +156,7 @@ func TestBeamToBeamDeleteSync(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
-	dstEP := beam.NewWriteEndpoint(dstMux, dstDir, dstCaps)
+	dstEP := beam.NewWriteEndpoint(dstMux, dstDir, dstDir, dstCaps)
 
 	// Walk destination to find extraneous files.
 	srcFiles := map[string]bool{"keep.txt": true}
@@ -206,8 +206,8 @@ func TestBeamToBeamMetadata(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
-	srcEP := beam.NewReadEndpoint(srcMux, srcDir, srcCaps)
-	dstEP := beam.NewWriteEndpoint(dstMux, dstDir, dstCaps)
+	srcEP := beam.NewReadEndpoint(srcMux, srcDir, srcDir, srcCaps)
+	dstEP := beam.NewWriteEndpoint(dstMux, dstDir, dstDir, dstCaps)
 
 	// Copy the file.
 	entry, err := srcEP.Stat("meta.txt")
@@ -260,7 +260,7 @@ func TestBeamEndToEndEngineIntegration(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
-	dstEP := beam.NewWriteEndpoint(dstMux, dstDir, dstCaps)
+	dstEP := beam.NewWriteEndpoint(dstMux, dstDir, dstDir, dstCaps)
 
 	// Use the engine to copy srcDir/dir/ → dstDir/ via beam endpoint.
 	ctx := context.Background()

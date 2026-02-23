@@ -104,7 +104,11 @@ type FileEntryMsg struct {
 }
 
 // WalkReq requests a recursive walk of the endpoint.
-type WalkReq struct{}
+// If RelPath is non-empty, only the subtree rooted at that path is walked.
+// Entry RelPaths in the response are relative to the walk root (RelPath).
+type WalkReq struct {
+	RelPath string `msg:"rel_path"`
+}
 
 // WalkEntry is a single entry streamed during a walk.
 type WalkEntry struct {

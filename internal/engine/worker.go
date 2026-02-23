@@ -1029,9 +1029,13 @@ func (wp *WorkerPool) processBatch(_ context.Context, task FileTask, workerID in
 // batchTasks wraps an input task channel with a batching layer. Small regular
 // files are accumulated into Batch tasks; large files, directories, symlinks,
 // and hardlinks pass through unchanged. A timer flushes partial batches after
-// MaxWait to prevent stalls.
+// MaxWait to prevent stalls at the end of a transfer.
 //
-//nolint:revive // cognitive-complexity: select loop with timer + flush + passthrough — irreducible
+// The batcher greedily drains the input channel on each iteration to fill
+// batches as quickly as possible, only falling back to a timer for the final
+// partial batch when the input is temporarily empty.
+//
+//nolint:gocyclo,revive // cyclomatic: select loop with timer + flush + passthrough — irreducible
 func batchTasks(ctx context.Context, input <-chan FileTask, cfg BatchConfig) <-chan FileTask {
 	out := make(chan FileTask, cap(input))
 	go func() {
@@ -1061,31 +1065,49 @@ func batchTasks(ctx context.Context, input <-chan FileTask, cfg BatchConfig) <-c
 			}
 		}
 
+		handleTask := func(task FileTask) {
+			if b.add(task) {
+				if b.ready() {
+					timer.Stop()
+					flushBatch()
+				}
+			} else {
+				// Task not batchable — flush pending batch first, then pass through.
+				timer.Stop()
+				flushBatch()
+				select {
+				case out <- task:
+				case <-ctx.Done():
+				}
+			}
+		}
+
 		for {
 			select {
 			case task, ok := <-input:
 				if !ok {
-					// Input closed — flush remaining batch.
 					flushBatch()
 					return
 				}
-				if b.add(task) {
-					if b.ready() {
-						timer.Stop()
-						flushBatch()
-					} else if b.len() == 1 {
-						// First item in a new batch — start timer.
-						timer.Reset(time.Duration(cfg.MaxWait) * time.Millisecond)
-					}
-				} else {
-					// Task not batchable — flush pending batch first, then pass through.
-					timer.Stop()
-					flushBatch()
+				handleTask(task)
+				// Greedily drain any already-queued tasks to fill batches
+				// without waiting for the timer.
+			drain:
+				for {
 					select {
-					case out <- task:
-					case <-ctx.Done():
-						return
+					case task, ok := <-input:
+						if !ok {
+							flushBatch()
+							return
+						}
+						handleTask(task)
+					default:
+						break drain
 					}
+				}
+				// If we have a partial batch after draining, start the timer.
+				if b.len() > 0 {
+					timer.Reset(time.Duration(cfg.MaxWait) * time.Millisecond)
 				}
 			case <-timer.C:
 				flushBatch()

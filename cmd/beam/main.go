@@ -596,8 +596,7 @@ func dialBeamRead(loc transport.Location, flagToken string) (*beam.ReadEndpoint,
 		return nil, err
 	}
 
-	_ = root // root is informational; path comes from loc
-	return beam.NewReadEndpoint(mux, loc.Path, caps), nil
+	return beam.NewReadEndpoint(mux, loc.Path, root, caps), nil
 }
 
 // dialBeamWrite connects to a beam daemon and returns a WriteEndpoint.
@@ -618,8 +617,7 @@ func dialBeamWrite(loc transport.Location, flagToken string) (*beam.WriteEndpoin
 		return nil, err
 	}
 
-	_ = root
-	return beam.NewWriteEndpoint(mux, loc.Path, caps), nil
+	return beam.NewWriteEndpoint(mux, loc.Path, root, caps), nil
 }
 
 func beamAddr(loc transport.Location) string {

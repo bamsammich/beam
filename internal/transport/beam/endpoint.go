@@ -8,12 +8,53 @@ import (
 	"io"
 	"net"
 	"os"
+	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"time"
 
 	"github.com/bamsammich/beam/internal/transport"
 	"github.com/bamsammich/beam/internal/transport/proto"
 )
+
+// computePathPrefix computes the path prefix that must be prepended to all
+// relPaths before sending them to the server. The server resolves paths
+// relative to its daemon root, but the client sends paths relative to
+// root (loc.Path). The prefix bridges the gap.
+//
+// Example: daemonRoot="/", root="/home/thudd/dst" → prefix="home/thudd/dst"
+// Then relPath "file.txt" → server sees "home/thudd/dst/file.txt" → resolves to
+// "/home/thudd/dst/file.txt" on the server.
+func computePathPrefix(root, daemonRoot string) string {
+	rel, err := filepath.Rel(daemonRoot, root)
+	if err != nil || rel == "." {
+		return ""
+	}
+	return rel
+}
+
+// serverPath translates a client-relative path to a server-relative path
+// by prepending the path prefix.
+func serverPath(prefix, relPath string) string {
+	if prefix == "" {
+		return relPath
+	}
+	return filepath.Join(prefix, relPath)
+}
+
+// clientPath translates a server-relative path back to a client-relative path
+// by stripping the path prefix.
+func clientPath(prefix, serverRelPath string) string {
+	if prefix == "" {
+		return serverRelPath
+	}
+	trimmed := strings.TrimPrefix(serverRelPath, prefix)
+	trimmed = strings.TrimPrefix(trimmed, "/")
+	if trimmed == "" {
+		return "."
+	}
+	return trimmed
+}
 
 // DefaultPort is the default beam daemon port.
 const DefaultPort = 9876
@@ -163,7 +204,8 @@ func decodeError(payload []byte) error {
 // ReadEndpoint implements transport.ReadEndpoint over the beam protocol.
 type ReadEndpoint struct {
 	mux        *proto.Mux
-	root       string
+	root       string // client-side root (loc.Path)
+	pathPrefix string // prefix to prepend to relPaths for server resolution
 	caps       transport.Capabilities
 	nextStream atomic.Uint32
 }
@@ -172,12 +214,15 @@ type ReadEndpoint struct {
 var _ transport.ReadEndpoint = (*ReadEndpoint)(nil)
 
 // NewReadEndpoint creates a read endpoint from an established mux connection.
+// root is the client's target path (loc.Path), daemonRoot is the server's root.
+// All relPaths sent to the server are prefixed with the path from daemonRoot to root.
 func NewReadEndpoint(
 	mux *proto.Mux,
-	root string,
+	root, daemonRoot string,
 	caps transport.Capabilities,
 ) *ReadEndpoint {
-	ep := &ReadEndpoint{mux: mux, root: root, caps: caps}
+	prefix := computePathPrefix(root, daemonRoot)
+	ep := &ReadEndpoint{mux: mux, root: root, pathPrefix: prefix, caps: caps}
 	ep.nextStream.Store(2) // 1 was used for caps query
 	return ep
 }
@@ -187,11 +232,17 @@ func (e *ReadEndpoint) allocStream() uint32 {
 }
 
 func (e *ReadEndpoint) Walk(fn func(entry transport.FileEntry) error) error {
+	return e.walkRel("", fn)
+}
+
+// walkRel walks a subtree starting at walkRoot (relative to endpoint root).
+// An empty walkRoot walks the entire endpoint root.
+func (e *ReadEndpoint) walkRel(walkRoot string, fn func(entry transport.FileEntry) error) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
 
-	req := proto.WalkReq{}
+	req := proto.WalkReq{RelPath: serverPath(e.pathPrefix, walkRoot)}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		return err
@@ -202,6 +253,7 @@ func (e *ReadEndpoint) Walk(fn func(entry transport.FileEntry) error) error {
 		return err
 	}
 
+	// The server returns entries with RelPath relative to the walk root.
 	for f := range ch {
 		switch f.MsgType {
 		case proto.MsgWalkEntry:
@@ -228,7 +280,7 @@ func (e *ReadEndpoint) Stat(relPath string) (transport.FileEntry, error) {
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
 
-	req := proto.StatReq{RelPath: relPath}
+	req := proto.StatReq{RelPath: serverPath(e.pathPrefix, relPath)}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		return transport.FileEntry{}, err
@@ -251,7 +303,9 @@ func (e *ReadEndpoint) Stat(relPath string) (transport.FileEntry, error) {
 	if _, err := resp.UnmarshalMsg(f.Payload); err != nil {
 		return transport.FileEntry{}, err
 	}
-	return proto.ToFileEntry(resp.Entry), nil
+	entry := proto.ToFileEntry(resp.Entry)
+	entry.RelPath = relPath // restore client-relative path
+	return entry, nil
 }
 
 func (e *ReadEndpoint) ReadDir(relPath string) ([]transport.FileEntry, error) {
@@ -259,7 +313,7 @@ func (e *ReadEndpoint) ReadDir(relPath string) ([]transport.FileEntry, error) {
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
 
-	req := proto.ReadDirReq{RelPath: relPath}
+	req := proto.ReadDirReq{RelPath: serverPath(e.pathPrefix, relPath)}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		return nil, err
@@ -294,7 +348,7 @@ func (e *ReadEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 
-	req := proto.OpenReadReq{RelPath: relPath}
+	req := proto.OpenReadReq{RelPath: serverPath(e.pathPrefix, relPath)}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		e.mux.CloseStream(streamID)
@@ -315,7 +369,7 @@ func (e *ReadEndpoint) Hash(relPath string) (string, error) {
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
 
-	req := proto.HashReq{RelPath: relPath}
+	req := proto.HashReq{RelPath: serverPath(e.pathPrefix, relPath)}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		return "", err
@@ -350,7 +404,7 @@ func (e *ReadEndpoint) ComputeSignature(
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
 
-	req := proto.ComputeSignatureReq{RelPath: relPath, FileSize: fileSize}
+	req := proto.ComputeSignatureReq{RelPath: serverPath(e.pathPrefix, relPath), FileSize: fileSize}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		return transport.Signature{}, err
@@ -385,7 +439,11 @@ func (e *ReadEndpoint) MatchBlocks(
 	defer e.mux.CloseStream(streamID)
 
 	blockSize, sigMsgs := proto.FromSignature(sig)
-	req := proto.MatchBlocksReq{RelPath: relPath, BlockSize: blockSize, Signatures: sigMsgs}
+	req := proto.MatchBlocksReq{
+		RelPath:    serverPath(e.pathPrefix, relPath),
+		BlockSize:  blockSize,
+		Signatures: sigMsgs,
+	}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		return nil, err
@@ -465,7 +523,8 @@ func (r *beamReader) Close() error {
 // WriteEndpoint implements transport.WriteEndpoint over the beam protocol.
 type WriteEndpoint struct {
 	mux        *proto.Mux
-	root       string
+	root       string // client-side root (loc.Path)
+	pathPrefix string // prefix to prepend to relPaths for server resolution
 	caps       transport.Capabilities
 	nextStream atomic.Uint32
 }
@@ -474,12 +533,14 @@ type WriteEndpoint struct {
 var _ transport.WriteEndpoint = (*WriteEndpoint)(nil)
 
 // NewWriteEndpoint creates a write endpoint from an established mux connection.
+// root is the client's target path (loc.Path), daemonRoot is the server's root.
 func NewWriteEndpoint(
 	mux *proto.Mux,
-	root string,
+	root, daemonRoot string,
 	caps transport.Capabilities,
 ) *WriteEndpoint {
-	ep := &WriteEndpoint{mux: mux, root: root, caps: caps}
+	prefix := computePathPrefix(root, daemonRoot)
+	ep := &WriteEndpoint{mux: mux, root: root, pathPrefix: prefix, caps: caps}
 	ep.nextStream.Store(2)
 	return ep
 }
@@ -493,7 +554,7 @@ func (e *WriteEndpoint) MkdirAll(relPath string, perm os.FileMode) error {
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
 
-	req := proto.MkdirAllReq{RelPath: relPath, Perm: uint32(perm)}
+	req := proto.MkdirAllReq{RelPath: serverPath(e.pathPrefix, relPath), Perm: uint32(perm)}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		return err
@@ -515,7 +576,7 @@ func (e *WriteEndpoint) CreateTemp(
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 
-	req := proto.CreateTempReq{RelPath: relPath, Perm: uint32(perm)}
+	req := proto.CreateTempReq{RelPath: serverPath(e.pathPrefix, relPath), Perm: uint32(perm)}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		e.mux.CloseStream(streamID)
@@ -546,12 +607,13 @@ func (e *WriteEndpoint) CreateTemp(
 
 	// Keep the stream open — WriteData and WriteDone reuse it so that the
 	// server handler processes chunks sequentially on one goroutine.
+	// Translate server-relative name back to client-relative.
 	return &beamWriteFile{
 		mux:      e.mux,
 		streamID: streamID,
 		ch:       ch,
 		handle:   resp.Handle,
-		name:     resp.Name,
+		name:     clientPath(e.pathPrefix, resp.Name),
 	}, nil
 }
 
@@ -560,7 +622,10 @@ func (e *WriteEndpoint) Rename(oldRel, newRel string) error {
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
 
-	req := proto.RenameReq{OldRel: oldRel, NewRel: newRel}
+	req := proto.RenameReq{
+		OldRel: serverPath(e.pathPrefix, oldRel),
+		NewRel: serverPath(e.pathPrefix, newRel),
+	}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		return err
@@ -579,7 +644,7 @@ func (e *WriteEndpoint) Remove(relPath string) error {
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
 
-	req := proto.RemoveReq{RelPath: relPath}
+	req := proto.RemoveReq{RelPath: serverPath(e.pathPrefix, relPath)}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		return err
@@ -598,7 +663,7 @@ func (e *WriteEndpoint) RemoveAll(relPath string) error {
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
 
-	req := proto.RemoveAllReq{RelPath: relPath}
+	req := proto.RemoveAllReq{RelPath: serverPath(e.pathPrefix, relPath)}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		return err
@@ -617,7 +682,7 @@ func (e *WriteEndpoint) Symlink(target, newRel string) error {
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
 
-	req := proto.SymlinkReq{Target: target, NewRel: newRel}
+	req := proto.SymlinkReq{Target: target, NewRel: serverPath(e.pathPrefix, newRel)}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		return err
@@ -636,7 +701,10 @@ func (e *WriteEndpoint) Link(oldRel, newRel string) error {
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
 
-	req := proto.LinkReq{OldRel: oldRel, NewRel: newRel}
+	req := proto.LinkReq{
+		OldRel: serverPath(e.pathPrefix, oldRel),
+		NewRel: serverPath(e.pathPrefix, newRel),
+	}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		return err
@@ -660,7 +728,7 @@ func (e *WriteEndpoint) SetMetadata(
 	defer e.mux.CloseStream(streamID)
 
 	req := proto.SetMetadataReq{
-		RelPath: relPath,
+		RelPath: serverPath(e.pathPrefix, relPath),
 		Entry:   proto.FromFileEntry(entry),
 		Opts:    proto.FromMetadataOpts(opts),
 	}
@@ -678,11 +746,24 @@ func (e *WriteEndpoint) SetMetadata(
 }
 
 func (e *WriteEndpoint) Walk(fn func(entry transport.FileEntry) error) error {
+	return e.walkRel("", fn)
+}
+
+// WalkSubtree walks a subtree starting at subDir (relative to endpoint root).
+// This is a beam-specific method (not on the transport.WriteEndpoint interface),
+// accessed via type assertion for building destination indexes efficiently.
+func (e *WriteEndpoint) WalkSubtree(subDir string, fn func(entry transport.FileEntry) error) error {
+	return e.walkRel(subDir, fn)
+}
+
+// walkRel walks a subtree starting at walkRoot (relative to endpoint root).
+// An empty walkRoot walks the entire endpoint root.
+func (e *WriteEndpoint) walkRel(walkRoot string, fn func(entry transport.FileEntry) error) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
 
-	req := proto.WalkReq{}
+	req := proto.WalkReq{RelPath: serverPath(e.pathPrefix, walkRoot)}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		return err
@@ -693,6 +774,7 @@ func (e *WriteEndpoint) Walk(fn func(entry transport.FileEntry) error) error {
 		return err
 	}
 
+	// The server returns entries with RelPath relative to the walk root.
 	for f := range ch {
 		switch f.MsgType {
 		case proto.MsgWalkEntry:
@@ -719,7 +801,7 @@ func (e *WriteEndpoint) Stat(relPath string) (transport.FileEntry, error) {
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
 
-	req := proto.StatReq{RelPath: relPath}
+	req := proto.StatReq{RelPath: serverPath(e.pathPrefix, relPath)}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		return transport.FileEntry{}, err
@@ -742,14 +824,16 @@ func (e *WriteEndpoint) Stat(relPath string) (transport.FileEntry, error) {
 	if _, err := resp.UnmarshalMsg(f.Payload); err != nil {
 		return transport.FileEntry{}, err
 	}
-	return proto.ToFileEntry(resp.Entry), nil
+	entry := proto.ToFileEntry(resp.Entry)
+	entry.RelPath = relPath // restore client-relative path
+	return entry, nil
 }
 
 func (e *WriteEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 
-	req := proto.OpenReadReq{RelPath: relPath}
+	req := proto.OpenReadReq{RelPath: serverPath(e.pathPrefix, relPath)}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		e.mux.CloseStream(streamID)
@@ -770,7 +854,7 @@ func (e *WriteEndpoint) Hash(relPath string) (string, error) {
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
 
-	req := proto.HashReq{RelPath: relPath}
+	req := proto.HashReq{RelPath: serverPath(e.pathPrefix, relPath)}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		return "", err
@@ -805,7 +889,7 @@ func (e *WriteEndpoint) ComputeSignature(
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
 
-	req := proto.ComputeSignatureReq{RelPath: relPath, FileSize: fileSize}
+	req := proto.ComputeSignatureReq{RelPath: serverPath(e.pathPrefix, relPath), FileSize: fileSize}
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
 		return transport.Signature{}, err
@@ -840,8 +924,8 @@ func (e *WriteEndpoint) ApplyDelta(
 	defer e.mux.CloseStream(streamID)
 
 	req := proto.ApplyDeltaReq{
-		BasisRelPath: basisRelPath,
-		TempRelPath:  tempRelPath,
+		BasisRelPath: serverPath(e.pathPrefix, basisRelPath),
+		TempRelPath:  serverPath(e.pathPrefix, tempRelPath),
 		Ops:          proto.FromDeltaOps(ops),
 	}
 	payload, err := req.MarshalMsg(nil)
@@ -877,6 +961,11 @@ func (e *WriteEndpoint) WriteFileBatch(
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
+
+	// Translate entry RelPaths to server-relative.
+	for i := range req.Entries {
+		req.Entries[i].RelPath = serverPath(e.pathPrefix, req.Entries[i].RelPath)
+	}
 
 	payload, err := req.MarshalMsg(nil)
 	if err != nil {
