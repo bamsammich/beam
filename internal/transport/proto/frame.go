@@ -35,6 +35,8 @@ var ErrFrameTooLarge = errors.New("frame exceeds maximum size")
 // WriteFrame writes a length-prefixed frame to w.
 // Wire format: [4-byte length (big-endian)][4-byte stream ID][1-byte msg type][payload]
 // The length field includes the header (stream ID + msg type) and payload.
+// Header and payload are combined into a single Write() call to avoid
+// Nagle/delayed-ACK interactions and reduce syscall overhead.
 //
 //nolint:gosec // G115: payload length bounded by MaxFrameSize check
 func WriteFrame(w io.Writer, f Frame) error {
@@ -43,18 +45,16 @@ func WriteFrame(w io.Writer, f Frame) error {
 		return ErrFrameTooLarge
 	}
 
-	var header [FrameHeaderSize]byte
-	binary.BigEndian.PutUint32(header[0:4], totalLen)
-	binary.BigEndian.PutUint32(header[4:8], f.StreamID)
-	header[8] = f.MsgType
+	// Combine header + payload into a single write to avoid two separate
+	// syscalls and Nagle/delayed-ACK latency on TCP connections.
+	buf := make([]byte, FrameHeaderSize+len(f.Payload))
+	binary.BigEndian.PutUint32(buf[0:4], totalLen)
+	binary.BigEndian.PutUint32(buf[4:8], f.StreamID)
+	buf[8] = f.MsgType
+	copy(buf[FrameHeaderSize:], f.Payload)
 
-	if _, err := w.Write(header[:]); err != nil {
-		return fmt.Errorf("write frame header: %w", err)
-	}
-	if len(f.Payload) > 0 {
-		if _, err := w.Write(f.Payload); err != nil {
-			return fmt.Errorf("write frame payload: %w", err)
-		}
+	if _, err := w.Write(buf); err != nil {
+		return fmt.Errorf("write frame: %w", err)
 	}
 	return nil
 }

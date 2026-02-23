@@ -96,7 +96,27 @@ Measured with [hyperfine](https://github.com/sharkdp/hyperfine) (3 runs, 1 warmu
 | **`beam -r`** | **203 ms** | **1.00x** |
 | `rsync -a` | 257 ms | 1.27x slower |
 
-beam is **2.1x faster than rsync** on large files and **1.27x faster** on many small files. The beam protocol with delta sync provides even larger gains over rsync for network transfers.
+beam is **2.1x faster than rsync** on large files and **1.27x faster** on many small files for local transfers.
+
+### Network transfers (beam protocol vs rsync over SSH)
+
+Measured with [hyperfine](https://github.com/sharkdp/hyperfine) (3 runs, 1 warmup) over a 1 Gbps Ethernet link.
+
+**1 GB file:**
+
+| Command | Mean | Relative |
+|:--------|-----:|---------:|
+| **`beam` (beam://)** | **4.81 s** | **1.00x** |
+| `rsync` (SSH) | 17.32 s | 3.60x slower |
+
+**10,000 x 4 KB files:**
+
+| Command | Mean | Relative |
+|:--------|-----:|---------:|
+| `rsync -r` (SSH) | **1.33 s** | **1.00x** |
+| `beam -r` (beam://) | 24.05 s | 18.11x slower |
+
+beam's custom protocol is **3.6x faster than rsync** for large file transfers thanks to TLS stream multiplexing and zero-overhead framing. rsync is still faster for many small files due to its highly optimized batch pipeline — small-file batching over the beam protocol is a planned optimization.
 
 > Run your own benchmarks: `beam --benchmark /src /dst` auto-measures throughput and tunes worker count.
 

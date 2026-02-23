@@ -43,6 +43,10 @@ const (
 	MsgLinkReq        byte = 0x2F
 	MsgSetMetadataReq byte = 0x31
 
+	// Batch write operations.
+	MsgWriteFileBatchReq  byte = 0x33
+	MsgWriteFileBatchResp byte = 0x34
+
 	// Delta transfer operations.
 	MsgComputeSignatureReq  byte = 0x50
 	MsgComputeSignatureResp byte = 0x51
@@ -243,6 +247,7 @@ type CapsResp struct {
 	FastCopy      bool `msg:"fast_copy"`
 	NativeHash    bool `msg:"native_hash"`
 	DeltaTransfer bool `msg:"delta_transfer"`
+	BatchWrite    bool `msg:"batch_write"`
 }
 
 // BlockSignatureMsg is the wire representation of a block signature.
@@ -295,6 +300,36 @@ type ApplyDeltaReq struct {
 // ApplyDeltaResp confirms delta application.
 type ApplyDeltaResp struct {
 	BytesWritten int64 `msg:"bytes_written"`
+}
+
+// WriteFileBatchEntry is a single file in a batch write request.
+type WriteFileBatchEntry struct {
+	RelPath string `msg:"rel_path"`
+	Data    []byte `msg:"data"`
+	ModTime int64  `msg:"mod_time"`
+	AccTime int64  `msg:"acc_time"`
+	Perm    uint32 `msg:"perm"`
+	Mode    uint32 `msg:"mode"`
+	UID     uint32 `msg:"uid"`
+	GID     uint32 `msg:"gid"`
+}
+
+// WriteFileBatchReq bundles multiple small files into a single request.
+type WriteFileBatchReq struct {
+	Entries []WriteFileBatchEntry `msg:"entries"`
+	Opts    MetadataOptsMsg       `msg:"opts"`
+}
+
+// WriteFileBatchResult is the per-file result of a batch write.
+type WriteFileBatchResult struct {
+	RelPath string `msg:"rel_path"`
+	Error   string `msg:"error"` // empty on success
+	OK      bool   `msg:"ok"`
+}
+
+// WriteFileBatchResp returns per-file results for a batch write.
+type WriteFileBatchResp struct {
+	Results []WriteFileBatchResult `msg:"results"`
 }
 
 // ErrorResp is a generic error response for any request.

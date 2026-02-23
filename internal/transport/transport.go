@@ -32,6 +32,7 @@ type Capabilities struct {
 	FastCopy      bool // local kernel-offload copy (copy_file_range, clonefile)
 	NativeHash    bool // can hash without transferring bytes to caller
 	DeltaTransfer bool // server supports ComputeSignature, MatchBlocks, ApplyDelta RPCs
+	BatchWrite    bool // server supports WriteFileBatch RPC for small-file batching
 }
 
 // MetadataOpts controls which metadata to set.

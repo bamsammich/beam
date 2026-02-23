@@ -8,6 +8,9 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/bamsammich/beam/internal/transport"
 )
@@ -80,6 +83,10 @@ func (h *Handler) dispatch(streamID uint32, f Frame) error {
 		return h.handleLink(streamID, f.Payload)
 	case MsgSetMetadataReq:
 		return h.handleSetMetadata(streamID, f.Payload)
+
+	// Batch write operations.
+	case MsgWriteFileBatchReq:
+		return h.handleWriteFileBatch(streamID, f.Payload)
 
 	// Delta transfer operations.
 	case MsgComputeSignatureReq:
@@ -501,6 +508,109 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 	n, err := cw.w.Write(p)
 	cw.n += int64(n)
 	return n, err
+}
+
+func (h *Handler) handleWriteFileBatch(streamID uint32, data []byte) error {
+	var req WriteFileBatchReq
+	if _, err := req.UnmarshalMsg(data); err != nil {
+		return fmt.Errorf("decode WriteFileBatchReq: %w", err)
+	}
+
+	opts := ToMetadataOpts(req.Opts)
+	results := make([]WriteFileBatchResult, len(req.Entries))
+	for i, entry := range req.Entries {
+		if err := h.writeOneFile(entry, opts); err != nil {
+			results[i] = WriteFileBatchResult{
+				RelPath: entry.RelPath,
+				OK:      false,
+				Error:   err.Error(),
+			}
+		} else {
+			results[i] = WriteFileBatchResult{
+				RelPath: entry.RelPath,
+				OK:      true,
+			}
+		}
+	}
+
+	resp := WriteFileBatchResp{Results: results}
+	payload, err := resp.MarshalMsg(nil)
+	if err != nil {
+		return err
+	}
+	return h.mux.Send(Frame{StreamID: streamID, MsgType: MsgWriteFileBatchResp, Payload: payload})
+}
+
+// writeOneFile atomically writes a single small file: mkdir parent, create temp,
+// write data, close, set metadata, rename. Temp file is cleaned up on failure.
+func (h *Handler) writeOneFile(entry WriteFileBatchEntry, opts transport.MetadataOpts) error {
+	// Ensure parent directory exists.
+	relDir := filepath.Dir(entry.RelPath)
+	if relDir != "." {
+		if err := h.write.MkdirAll(relDir, 0755); err != nil {
+			return fmt.Errorf("mkdir %s: %w", relDir, err)
+		}
+	}
+
+	// Create temp file.
+	absPath := filepath.Join(h.write.Root(), entry.RelPath)
+	dir := filepath.Dir(absPath)
+	base := filepath.Base(absPath)
+	tmpName := fmt.Sprintf(".%s.%s.beam-tmp", base, uuid.New().String()[:8])
+	tmpPath := filepath.Join(dir, tmpName)
+	tmpRelPath := relPathFromRoot(h.write.Root(), tmpPath)
+
+	perm := os.FileMode(entry.Perm)
+	if perm == 0 {
+		perm = 0644
+	}
+
+	f, err := os.OpenFile(tmpPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, perm)
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	defer func() {
+		// Best-effort cleanup on failure: remove temp if it still exists.
+		os.Remove(tmpPath) //nolint:errcheck // best-effort cleanup of temp file on failure
+	}()
+
+	// Write data.
+	if _, err := f.Write(entry.Data); err != nil {
+		f.Close()
+		return fmt.Errorf("write data: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close temp: %w", err)
+	}
+
+	// Set metadata.
+	fe := transport.FileEntry{
+		Mode:    os.FileMode(entry.Mode),
+		ModTime: time.Unix(0, entry.ModTime),
+		AccTime: time.Unix(0, entry.AccTime),
+		UID:     entry.UID,
+		GID:     entry.GID,
+	}
+	if err := h.write.SetMetadata(tmpRelPath, fe, opts); err != nil {
+		return fmt.Errorf("set metadata: %w", err)
+	}
+
+	// Atomic rename.
+	if err := h.write.Rename(tmpRelPath, entry.RelPath); err != nil {
+		return fmt.Errorf("rename: %w", err)
+	}
+
+	// Success — prevent deferred cleanup from removing the renamed file.
+	// The deferred os.Remove will harmlessly fail since tmpPath no longer exists.
+	return nil
+}
+
+func relPathFromRoot(root, absPath string) string {
+	rel, err := filepath.Rel(root, absPath)
+	if err != nil {
+		return absPath
+	}
+	return rel
 }
 
 func (h *Handler) sendAck(streamID uint32) error {
