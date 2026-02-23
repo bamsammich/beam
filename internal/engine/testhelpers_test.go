@@ -144,6 +144,23 @@ func dialBeamReadEndpoint(t *testing.T, addr, token, root string) *beam.ReadEndp
 	return beam.NewReadEndpoint(mux, root, root, caps)
 }
 
+// dialBeamReadEndpointCustomRoots dials a beam daemon and returns a
+// ReadEndpoint with explicit endpointRoot and daemonRoot. This allows tests
+// to simulate non-local source paths by constructing a pathPrefix that maps
+// a fictional client-side root to real data on the daemon.
+func dialBeamReadEndpointCustomRoots(
+	t *testing.T,
+	addr, token, endpointRoot, daemonRoot string,
+) *beam.ReadEndpoint {
+	t.Helper()
+
+	mux, _, caps, err := beam.DialBeam(addr, token, proto.ClientTLSConfig(true))
+	require.NoError(t, err)
+	t.Cleanup(func() { mux.Close() })
+
+	return beam.NewReadEndpoint(mux, endpointRoot, daemonRoot, caps)
+}
+
 // dialBeamWriteEndpoint dials a beam daemon and returns a WriteEndpoint.
 // The underlying mux is closed on test cleanup.
 func dialBeamWriteEndpoint(t *testing.T, addr, token, root string) *beam.WriteEndpoint {
