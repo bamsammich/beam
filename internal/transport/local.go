@@ -93,6 +93,7 @@ func (*LocalReadEndpoint) Caps() Capabilities {
 		FastCopy:      true,
 		NativeHash:    true,
 		DeltaTransfer: true,
+		BatchWrite:    true,
 	}
 }
 
@@ -254,6 +255,7 @@ func (*LocalWriteEndpoint) Caps() Capabilities {
 		FastCopy:      true,
 		NativeHash:    true,
 		DeltaTransfer: true,
+		BatchWrite:    true,
 	}
 }
 

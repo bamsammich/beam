@@ -1,6 +1,7 @@
 package proto
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"io"
@@ -29,7 +30,15 @@ type Mux struct {
 
 // NewMux creates a new multiplexer wrapping the given connection.
 // Call Run() to start the read/write loops.
+// If the underlying connection supports it, TCP_NODELAY is set to avoid
+// Nagle-algorithm delays on small frames (the buffered writer in writeLoop
+// handles batching at the application level).
 func NewMux(conn net.Conn) *Mux {
+	// Set TCP_NODELAY — the buffered writer handles coalescing.
+	//nolint:errcheck // best-effort; non-TCP connections may not support this
+	if tc, ok := conn.(interface{ SetNoDelay(bool) error }); ok {
+		tc.SetNoDelay(true)
+	}
 	return &Mux{
 		conn:    conn,
 		writeCh: make(chan Frame, 256),
@@ -190,10 +199,18 @@ func (m *Mux) readLoop() error {
 }
 
 func (m *Mux) writeLoop() error {
+	bw := bufio.NewWriterSize(m.conn, 64*1024)
 	for f := range m.writeCh {
-		if err := WriteFrame(m.conn, f); err != nil {
+		if err := WriteFrame(bw, f); err != nil {
 			return fmt.Errorf("write frame: %w", err)
 		}
+		// Flush when the write channel is drained (no more frames queued),
+		// so we batch multiple frames into fewer TCP segments.
+		if len(m.writeCh) == 0 {
+			if err := bw.Flush(); err != nil {
+				return fmt.Errorf("flush: %w", err)
+			}
+		}
 	}
-	return nil
+	return bw.Flush()
 }

@@ -55,6 +55,7 @@ func ToCaps(c CapsResp) transport.Capabilities {
 		FastCopy:      c.FastCopy,
 		NativeHash:    c.NativeHash,
 		DeltaTransfer: c.DeltaTransfer,
+		BatchWrite:    c.BatchWrite,
 	}
 }
 
@@ -68,6 +69,7 @@ func FromCaps(c transport.Capabilities) CapsResp {
 		FastCopy:      c.FastCopy,
 		NativeHash:    c.NativeHash,
 		DeltaTransfer: c.DeltaTransfer,
+		BatchWrite:    c.BatchWrite,
 	}
 }
 

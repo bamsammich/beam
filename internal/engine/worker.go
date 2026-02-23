@@ -19,6 +19,7 @@ import (
 	"github.com/bamsammich/beam/internal/stats"
 	"github.com/bamsammich/beam/internal/transport"
 	"github.com/bamsammich/beam/internal/transport/beam"
+	"github.com/bamsammich/beam/internal/transport/proto"
 )
 
 // WorkerConfig controls worker behavior.
@@ -78,15 +79,25 @@ func isLocalEndpoints(src transport.ReadEndpoint, dst transport.WriteEndpoint) b
 
 // Run starts workers that consume tasks. It blocks until all tasks are
 // processed or the context is cancelled. Errors are sent to errs.
+// When the destination is a beam endpoint with BatchWrite capability,
+// the task channel is wrapped with a batching layer that coalesces small
+// files into batch RPCs.
 //
 //nolint:revive // cognitive-complexity: worker loop with throttle, cancel, and error dispatch
 func (wp *WorkerPool) Run(ctx context.Context, tasks <-chan FileTask, errs chan<- error) {
+	// Wrap with batching layer when destination supports batch writes.
+	taskCh := tasks
+	if beamDst, ok := wp.cfg.DstEndpoint.(*beam.WriteEndpoint); ok &&
+		beamDst.Caps().BatchWrite {
+		taskCh = batchTasks(ctx, tasks, DefaultBatchConfig())
+	}
+
 	var wg sync.WaitGroup
 	for i := range wp.cfg.NumWorkers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for task := range tasks {
+			for task := range taskCh {
 				// Throttle: wait if this worker's ID is at or above the limit.
 				if !wp.waitForThrottle(ctx, i) {
 					return
@@ -166,6 +177,8 @@ func (wp *WorkerPool) processTask(ctx context.Context, task FileTask, workerID i
 		return wp.createHardlink(task, workerID)
 	case Regular:
 		return wp.copyRegularFile(ctx, task, workerID)
+	case Batch:
+		return wp.processBatch(ctx, task, workerID)
 	default:
 		return fmt.Errorf("unknown task type %d for %s", task.Type, task.SrcPath)
 	}
@@ -854,4 +867,232 @@ func taskToEntry(task FileTask) transport.FileEntry {
 		UID:     task.UID,
 		GID:     task.GID,
 	}
+}
+
+// processBatch handles a Batch task by reading source data for each file,
+// building a WriteFileBatchReq, and sending it to the beam daemon. Individual
+// file events are emitted for stats/UI rendering.
+//
+//nolint:gocyclo,revive // cyclomatic: batch assembly + per-file error handling + stats emit
+func (wp *WorkerPool) processBatch(_ context.Context, task FileTask, workerID int) error {
+	beamDst, ok := wp.cfg.DstEndpoint.(*beam.WriteEndpoint)
+	if !ok {
+		// Fallback: process each file individually if not a beam endpoint.
+		for _, ft := range task.BatchFiles {
+			if err := wp.copyRegularFile(context.Background(), ft, workerID); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+
+	// Build the batch request: read source data for each file.
+	entries := make([]proto.WriteFileBatchEntry, 0, len(task.BatchFiles))
+	fileTasks := make([]FileTask, 0, len(task.BatchFiles))
+
+	for _, ft := range task.BatchFiles {
+		wp.cfg.Stats.AddFilesScanned(1)
+		wp.emit(event.Event{
+			Type:     event.FileStarted,
+			Path:     ft.DstPath,
+			Size:     ft.Size,
+			WorkerID: workerID,
+		})
+
+		relSrc, err := filepath.Rel(wp.cfg.SrcEndpoint.Root(), ft.SrcPath)
+		if err != nil {
+			wp.cfg.Stats.AddFilesFailed(1)
+			wp.emit(event.Event{
+				Type:     event.FileFailed,
+				Path:     ft.DstPath,
+				Size:     ft.Size,
+				Error:    err,
+				WorkerID: workerID,
+			})
+			continue
+		}
+
+		srcReader, err := wp.cfg.SrcEndpoint.OpenRead(relSrc)
+		if err != nil {
+			wp.cfg.Stats.AddFilesFailed(1)
+			wp.emit(event.Event{
+				Type:     event.FileFailed,
+				Path:     ft.DstPath,
+				Size:     ft.Size,
+				Error:    err,
+				WorkerID: workerID,
+			})
+			continue
+		}
+
+		data, err := io.ReadAll(srcReader)
+		srcReader.Close()
+		if err != nil {
+			wp.cfg.Stats.AddFilesFailed(1)
+			wp.emit(event.Event{
+				Type:     event.FileFailed,
+				Path:     ft.DstPath,
+				Size:     ft.Size,
+				Error:    err,
+				WorkerID: workerID,
+			})
+			continue
+		}
+
+		relDst, err := wp.relDst(ft.DstPath)
+		if err != nil {
+			wp.cfg.Stats.AddFilesFailed(1)
+			wp.emit(event.Event{
+				Type:     event.FileFailed,
+				Path:     ft.DstPath,
+				Size:     ft.Size,
+				Error:    err,
+				WorkerID: workerID,
+			})
+			continue
+		}
+
+		entries = append(entries, proto.WriteFileBatchEntry{
+			RelPath: relDst,
+			Data:    data,
+			Perm:    ft.Mode & 0o7777,
+			Mode:    ft.Mode,
+			ModTime: ft.ModTime.UnixNano(),
+			AccTime: ft.AccTime.UnixNano(),
+			UID:     ft.UID,
+			GID:     ft.GID,
+		})
+		fileTasks = append(fileTasks, ft)
+	}
+
+	if len(entries) == 0 {
+		return nil
+	}
+
+	// Send batch RPC.
+	req := proto.WriteFileBatchReq{
+		Entries: entries,
+		Opts: proto.MetadataOptsMsg{
+			Mode:  wp.cfg.PreserveMode,
+			Times: !wp.cfg.NoTimes,
+			Owner: wp.cfg.PreserveOwner,
+			Xattr: wp.cfg.PreserveXattr,
+		},
+	}
+
+	results, err := beamDst.WriteFileBatch(req)
+	if err != nil {
+		// Entire batch failed — report all as failed.
+		for _, ft := range fileTasks {
+			wp.cfg.Stats.AddFilesFailed(1)
+			wp.emit(event.Event{
+				Type:     event.FileFailed,
+				Path:     ft.DstPath,
+				Size:     ft.Size,
+				Error:    err,
+				WorkerID: workerID,
+			})
+		}
+		return fmt.Errorf("batch write: %w", err)
+	}
+
+	// Process per-file results.
+	for i, result := range results {
+		if i >= len(fileTasks) {
+			break
+		}
+		ft := fileTasks[i]
+		if result.OK {
+			wp.cfg.Stats.AddFilesCopied(1)
+			wp.cfg.Stats.AddBytesCopied(ft.Size)
+			wp.emit(event.Event{
+				Type:     event.FileCompleted,
+				Path:     ft.DstPath,
+				Size:     ft.Size,
+				WorkerID: workerID,
+			})
+		} else {
+			wp.cfg.Stats.AddFilesFailed(1)
+			wp.emit(event.Event{
+				Type:     event.FileFailed,
+				Path:     ft.DstPath,
+				Size:     ft.Size,
+				Error:    errors.New(result.Error),
+				WorkerID: workerID,
+			})
+		}
+	}
+
+	return nil
+}
+
+// batchTasks wraps an input task channel with a batching layer. Small regular
+// files are accumulated into Batch tasks; large files, directories, symlinks,
+// and hardlinks pass through unchanged. A timer flushes partial batches after
+// MaxWait to prevent stalls.
+//
+//nolint:revive // cognitive-complexity: select loop with timer + flush + passthrough — irreducible
+func batchTasks(ctx context.Context, input <-chan FileTask, cfg BatchConfig) <-chan FileTask {
+	out := make(chan FileTask, cap(input))
+	go func() {
+		defer close(out)
+		b := newBatcher(cfg)
+		timer := time.NewTimer(time.Duration(cfg.MaxWait) * time.Millisecond)
+		timer.Stop()
+
+		flushBatch := func() {
+			batch := b.flush()
+			if len(batch) == 0 {
+				return
+			}
+			var totalSize int64
+			for _, ft := range batch {
+				totalSize += ft.Size
+			}
+			batchTask := FileTask{
+				Type:       Batch,
+				BatchFiles: batch,
+				Size:       totalSize,
+			}
+			select {
+			case out <- batchTask:
+			case <-ctx.Done():
+				return
+			}
+		}
+
+		for {
+			select {
+			case task, ok := <-input:
+				if !ok {
+					// Input closed — flush remaining batch.
+					flushBatch()
+					return
+				}
+				if b.add(task) {
+					if b.ready() {
+						timer.Stop()
+						flushBatch()
+					} else if b.len() == 1 {
+						// First item in a new batch — start timer.
+						timer.Reset(time.Duration(cfg.MaxWait) * time.Millisecond)
+					}
+				} else {
+					// Task not batchable — flush pending batch first, then pass through.
+					timer.Stop()
+					flushBatch()
+					select {
+					case out <- task:
+					case <-ctx.Done():
+						return
+					}
+				}
+			case <-timer.C:
+				flushBatch()
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
 }

@@ -868,6 +868,41 @@ func (e *WriteEndpoint) ApplyDelta(
 	return resp.BytesWritten, nil
 }
 
+// WriteFileBatch sends a batch of small files to the remote daemon in a single
+// round-trip. This is a beam-specific method (not on the transport.WriteEndpoint
+// interface), accessed via type assertion, same pattern as delta transfer.
+func (e *WriteEndpoint) WriteFileBatch(
+	req proto.WriteFileBatchReq,
+) ([]proto.WriteFileBatchResult, error) {
+	streamID := e.allocStream()
+	ch := e.mux.OpenStream(streamID)
+	defer e.mux.CloseStream(streamID)
+
+	payload, err := req.MarshalMsg(nil)
+	if err != nil {
+		return nil, err
+	}
+	if err := e.mux.Send(
+		proto.Frame{StreamID: streamID, MsgType: proto.MsgWriteFileBatchReq, Payload: payload},
+	); err != nil {
+		return nil, err
+	}
+
+	f, ok := <-ch
+	if !ok {
+		return nil, errors.New("stream closed")
+	}
+	if f.MsgType == proto.MsgErrorResp {
+		return nil, decodeError(f.Payload)
+	}
+
+	var resp proto.WriteFileBatchResp
+	if _, err := resp.UnmarshalMsg(f.Payload); err != nil {
+		return nil, err
+	}
+	return resp.Results, nil
+}
+
 func (e *WriteEndpoint) Root() string                 { return e.root }
 func (e *WriteEndpoint) Caps() transport.Capabilities { return e.caps }
 func (e *WriteEndpoint) Close() error                 { return e.mux.Close() }
