@@ -11,9 +11,18 @@ import (
 	"github.com/bamsammich/beam/internal/config"
 )
 
+// setTestDiscoveryPath overrides the discovery path for a test and restores it
+// after the test completes.
+func setTestDiscoveryPath(t *testing.T, dir string) {
+	t.Helper()
+	path := filepath.Join(dir, "beam", "daemon.toml")
+	config.SetDaemonDiscoveryPathOverride(path)
+	t.Cleanup(func() { config.SetDaemonDiscoveryPathOverride("") })
+}
+
 func TestWriteDaemonDiscovery(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+	setTestDiscoveryPath(t, dir)
 
 	err := config.WriteDaemonDiscovery(config.DaemonDiscovery{
 		Token: "test-token-abc123",
@@ -21,29 +30,29 @@ func TestWriteDaemonDiscovery(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	// File should exist at ~/.config/beam/daemon.toml.
+	// File should exist at the overridden path.
 	path := filepath.Join(dir, "beam", "daemon.toml")
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Contains(t, string(data), `token = "test-token-abc123"`)
 	assert.Contains(t, string(data), "port = 9876")
 
-	// File permissions should be owner-only.
+	// File permissions should be world-readable.
 	info, err := os.Stat(path)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	assert.Equal(t, os.FileMode(0o644), info.Mode().Perm())
 }
 
 func TestReadDaemonDiscovery(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+	setTestDiscoveryPath(t, dir)
 
 	configDir := filepath.Join(dir, "beam")
 	require.NoError(t, os.MkdirAll(configDir, 0o755))
 
 	content := "token = \"my-token\"\nport = 1234\n"
 	require.NoError(t, os.WriteFile(
-		filepath.Join(configDir, "daemon.toml"), []byte(content), 0o600,
+		filepath.Join(configDir, "daemon.toml"), []byte(content), 0o644,
 	))
 
 	d, err := config.ReadDaemonDiscovery()
@@ -53,7 +62,8 @@ func TestReadDaemonDiscovery(t *testing.T) {
 }
 
 func TestReadDaemonDiscovery_Missing(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	dir := t.TempDir()
+	setTestDiscoveryPath(t, dir)
 
 	_, err := config.ReadDaemonDiscovery()
 	assert.ErrorIs(t, err, os.ErrNotExist)
@@ -61,7 +71,7 @@ func TestReadDaemonDiscovery_Missing(t *testing.T) {
 
 func TestRemoveDaemonDiscovery(t *testing.T) {
 	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
+	setTestDiscoveryPath(t, dir)
 
 	// Write then remove.
 	require.NoError(t, config.WriteDaemonDiscovery(config.DaemonDiscovery{
@@ -76,6 +86,5 @@ func TestRemoveDaemonDiscovery(t *testing.T) {
 }
 
 func TestDaemonDiscoveryPath(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", "/custom/config")
-	assert.Equal(t, "/custom/config/beam/daemon.toml", config.DaemonDiscoveryPath())
+	assert.Equal(t, "/etc/beam/daemon.toml", config.DaemonDiscoveryPath())
 }

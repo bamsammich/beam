@@ -46,7 +46,7 @@ make build
 # Local recursive copy with archive mode (preserves permissions, timestamps, xattrs)
 beam -a ~/photos /backup/photos
 
-# Remote copy via SSH
+# Remote copy via SSH (auto-upgrades to beam protocol if daemon is running)
 beam -a /data user@nas:/backup/data
 
 # Remote copy via beam protocol (faster than SFTP)

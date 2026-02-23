@@ -60,6 +60,7 @@ internal/
     location.go            — user@host:path location parsing
     beam/
       endpoint.go          — beam protocol ReadEndpoint + WriteEndpoint (incl. WriteFileBatch)
+      discover.go          — SSH beam daemon auto-detection, tunnel, convenience wrappers
     proto/
       daemon.go            — standalone TCP daemon (beam daemon)
       mux.go               — stream multiplexer over single TLS connection
@@ -160,15 +161,13 @@ All initial phases are implemented:
 - **Phase 7** — Polish: `--bwlimit`, `--benchmark`, JSON logging, man pages, CI/CD
 - **Batch RPC** — WriteFileBatchReq/Resp for small-file batching, TCP/mux optimizations
 - **Path fix + DstIndex** — Beam endpoint path translation, subtree Walk, pre-built destination index for skip detection
-
-### Next Up
-- **Phase 6d** — SSH beam auto-detection
-  - Auto-detect beam on remote: try `beam --server` over SSH, fall back to SFTP
+- **Phase 6d** — SSH beam daemon auto-detection: reads `/etc/beam/daemon.toml` over SFTP, tunnels TLS connection to daemon through SSH, upgrades to beam protocol transparently; `--no-beam-ssh` flag to force SFTP
 
 ### Known Issues
 
 - **`--bwlimit` has no effect on local copies.** The kernel fast paths (`copy_file_range`, `sendfile`) bypass userspace entirely, so the `rate.Limiter` wrapping `io.Reader`/`io.Writer` is never hit. Fix: when `--bwlimit` is set, skip the kernel fast path and fall back to the userspace read/write loop where the limiter lives.
 - **VHS demo GIFs need re-recording.** The current inline and TUI demo GIFs complete too fast to show the HUD. Re-record after bwlimit is fixed for local copies, or use a real network transfer between two machines.
+- **`DialBeam`/`DialBeamConn`/`DialBeamTunnel` return 4 values.** This triggers `function-result-limit` lint errors (currently suppressed with `//nolint:revive`). Fix: introduce a `BeamConn` result struct (`Mux *proto.Mux`, `Root string`, `Caps transport.Capabilities`) so all three functions return `(BeamConn, error)`. Update all call sites in `endpoint.go`, `discover.go`, `endpoint_test.go`, `integration_test.go`, and `cmd/beam/main.go`.
 
 ---
 

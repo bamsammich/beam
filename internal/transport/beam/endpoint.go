@@ -67,10 +67,10 @@ func clientPath(prefix, serverRelPath string) string {
 // DefaultPort is the default beam daemon port.
 const DefaultPort = 9876
 
-// DialBeam connects to a beam daemon, performs TLS handshake and protocol
-// handshake. Returns a running mux, the server root, and capabilities.
+// DialBeam connects to a beam daemon over TLS, performs protocol handshake.
+// Returns a running mux, the server root, and capabilities.
 //
-//nolint:revive // cyclomatic: TLS dial + handshake + response parsing — irreducible
+//nolint:revive // function-result-limit: established API returning (mux, root, caps, err)
 func DialBeam(
 	addr, token string,
 	tlsConfig *tls.Config,
@@ -80,6 +80,18 @@ func DialBeam(
 		return nil, "", transport.Capabilities{}, fmt.Errorf("dial %s: %w", addr, err)
 	}
 
+	return DialBeamConn(conn, token)
+}
+
+// DialBeamConn performs the beam protocol handshake over an already-established
+// connection. This is the core handshake logic shared by DialBeam (direct TLS)
+// and DialBeamTunnel (SSH-tunneled TLS). Returns a running mux, the server
+// root, and capabilities.
+//
+//nolint:revive // cyclomatic: handshake + response parsing — irreducible
+func DialBeamConn(
+	conn net.Conn, token string,
+) (*proto.Mux, string, transport.Capabilities, error) {
 	mux := proto.NewMux(conn)
 
 	// Start mux in background.
