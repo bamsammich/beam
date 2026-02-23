@@ -25,8 +25,8 @@ var daemonCmd = &cobra.Command{
 
 The daemon listens for TLS connections and authenticates clients using a bearer
 token. By default it generates a random token and writes it (along with the
-listen port) to ~/.config/beam/daemon.toml so that beam clients connecting
-over SSH can discover and authenticate automatically.
+listen port) to /etc/beam/daemon.toml so that beam clients connecting over SSH
+can discover and authenticate automatically.
 
 The daemon serves the entire filesystem visible to the running user. Use --root
 to restrict access to a specific directory.

@@ -10,7 +10,23 @@ import (
 	"github.com/BurntSushi/toml"
 )
 
-// DaemonDiscovery holds daemon connection info written to ~/.config/beam/daemon.toml.
+// SystemDaemonDiscoveryPath is the well-known system-wide path for the daemon
+// discovery file. This path is readable by all users (0644) and writable by
+// root/daemon process, making it accessible to SSH users connecting to discover
+// a running beam daemon.
+const SystemDaemonDiscoveryPath = "/etc/beam/daemon.toml"
+
+// daemonDiscoveryPathOverride allows tests to redirect the discovery file path.
+// When empty, DaemonDiscoveryPath() returns SystemDaemonDiscoveryPath.
+var daemonDiscoveryPathOverride string //nolint:gochecknoglobals // test hook
+
+// SetDaemonDiscoveryPathOverride sets a test override for the discovery path.
+// Pass "" to restore the default. This is intended for tests only.
+func SetDaemonDiscoveryPathOverride(path string) {
+	daemonDiscoveryPathOverride = path
+}
+
+// DaemonDiscovery holds daemon connection info written to /etc/beam/daemon.toml.
 // Remote clients read this file over SFTP to discover and authenticate with a
 // running beam daemon.
 type DaemonDiscovery struct {
@@ -20,24 +36,16 @@ type DaemonDiscovery struct {
 
 // DaemonDiscoveryPath returns the path to the daemon discovery file.
 func DaemonDiscoveryPath() string {
-	dir := os.Getenv("XDG_CONFIG_HOME")
-	if dir == "" {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return ""
-		}
-		dir = filepath.Join(home, ".config")
+	if daemonDiscoveryPathOverride != "" {
+		return daemonDiscoveryPathOverride
 	}
-	return filepath.Join(dir, "beam", "daemon.toml")
+	return SystemDaemonDiscoveryPath
 }
 
-// WriteDaemonDiscovery writes the daemon discovery file with owner-only permissions.
-// Creates the parent directory if needed.
+// WriteDaemonDiscovery writes the daemon discovery file with world-readable
+// permissions (0644). Creates the parent directory if needed.
 func WriteDaemonDiscovery(d DaemonDiscovery) error {
 	path := DaemonDiscoveryPath()
-	if path == "" {
-		return errors.New("cannot determine config directory")
-	}
 
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
@@ -48,16 +56,14 @@ func WriteDaemonDiscovery(d DaemonDiscovery) error {
 		return fmt.Errorf("encode daemon discovery: %w", err)
 	}
 
-	return os.WriteFile(path, buf.Bytes(), 0o600)
+	//nolint:gosec // G306: world-readable is intentional for SSH user discovery
+	return os.WriteFile(path, buf.Bytes(), 0o644)
 }
 
 // ReadDaemonDiscovery reads the daemon discovery file. Returns os.ErrNotExist
 // if the file does not exist.
 func ReadDaemonDiscovery() (DaemonDiscovery, error) {
 	path := DaemonDiscoveryPath()
-	if path == "" {
-		return DaemonDiscovery{}, errors.New("cannot determine config directory")
-	}
 
 	var d DaemonDiscovery
 	_, err := toml.DecodeFile(path, &d)
@@ -72,8 +78,5 @@ func ReadDaemonDiscovery() (DaemonDiscovery, error) {
 
 // RemoveDaemonDiscovery removes the daemon discovery file (best-effort).
 func RemoveDaemonDiscovery() {
-	path := DaemonDiscoveryPath()
-	if path != "" {
-		os.Remove(path) //nolint:errcheck // best-effort cleanup on shutdown
-	}
+	os.Remove(DaemonDiscoveryPath()) //nolint:errcheck // best-effort cleanup on shutdown
 }

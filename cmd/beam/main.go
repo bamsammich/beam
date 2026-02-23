@@ -80,6 +80,7 @@ func run() int {
 		bwLimitStr     string
 		logFile        string
 		benchmarkFlag  bool
+		noBeamSSH      bool
 	)
 
 	chain := filter.NewChain()
@@ -159,13 +160,27 @@ func run() int {
 					if err != nil {
 						return fmt.Errorf("ssh connect to %s: %w", loc.Host, err)
 					}
-					ep, err := transport.NewSFTPReadEndpoint(sshClient, loc.Path)
-					if err != nil {
-						sshClient.Close()
-						return fmt.Errorf("sftp session to %s: %w", loc.Host, err)
+					if !noBeamSSH {
+						ep, beamErr := beam.TryBeamSSHRead(sshClient, loc.Path)
+						if beamErr == nil {
+							slog.Info("using beam protocol (daemon detected on remote)")
+							srcEndpoint = ep
+							defer sshClient.Close()
+							defer ep.Close()
+						} else {
+							slog.Debug("beam daemon not detected on remote, using SFTP",
+								"error", beamErr)
+						}
 					}
-					srcEndpoint = ep
-					defer ep.Close()
+					if srcEndpoint == nil {
+						ep, err := transport.NewSFTPReadEndpoint(sshClient, loc.Path)
+						if err != nil {
+							sshClient.Close()
+							return fmt.Errorf("sftp session to %s: %w", loc.Host, err)
+						}
+						srcEndpoint = ep
+						defer ep.Close()
+					}
 				}
 			}
 
@@ -185,13 +200,27 @@ func run() int {
 					if err != nil {
 						return fmt.Errorf("ssh connect to %s: %w", dstLoc.Host, err)
 					}
-					ep, err := transport.NewSFTPWriteEndpoint(sshClient, dstLoc.Path)
-					if err != nil {
-						sshClient.Close()
-						return fmt.Errorf("sftp session to %s: %w", dstLoc.Host, err)
+					if !noBeamSSH {
+						ep, beamErr := beam.TryBeamSSHWrite(sshClient, dstLoc.Path)
+						if beamErr == nil {
+							slog.Info("using beam protocol (daemon detected on remote)")
+							dstEndpoint = ep
+							defer sshClient.Close()
+							defer ep.Close()
+						} else {
+							slog.Debug("beam daemon not detected on remote, using SFTP",
+								"error", beamErr)
+						}
 					}
-					dstEndpoint = ep
-					defer ep.Close()
+					if dstEndpoint == nil {
+						ep, err := transport.NewSFTPWriteEndpoint(sshClient, dstLoc.Path)
+						if err != nil {
+							sshClient.Close()
+							return fmt.Errorf("sftp session to %s: %w", dstLoc.Host, err)
+						}
+						dstEndpoint = ep
+						defer ep.Close()
+					}
 				}
 			}
 
@@ -516,6 +545,8 @@ func run() int {
 		StringVar(&logFile, "log", "", "write structured JSON log to FILE")
 	rootCmd.Flags().
 		BoolVar(&benchmarkFlag, "benchmark", false, "measure throughput before copy and auto-tune workers")
+	rootCmd.Flags().
+		BoolVar(&noBeamSSH, "no-beam-ssh", false, "disable beam daemon auto-detection over SSH (force SFTP)")
 
 	// Register subcommands.
 	rootCmd.AddCommand(daemonCmd)
