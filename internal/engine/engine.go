@@ -19,6 +19,7 @@ import (
 	"github.com/bamsammich/beam/internal/filter"
 	"github.com/bamsammich/beam/internal/stats"
 	"github.com/bamsammich/beam/internal/transport"
+	"github.com/bamsammich/beam/internal/transport/beam"
 )
 
 // Config describes a copy operation.
@@ -309,6 +310,9 @@ func runMultiSourceCopy(
 			srcEP := ensureSrcEndpoint(cfg.SrcEndpoint, rs.srcPath)
 			dstEP := ensureDstEndpoint(cfg.DstEndpoint, rs.dstBase)
 
+			// Build destination index for remote endpoints (avoids per-file Stat RPCs).
+			dstIndex := buildDstIndex(dstEP, rs.dstBase)
+
 			scanCfg := ScannerConfig{
 				SrcRoot:        rs.srcPath,
 				DstRoot:        rs.dstBase,
@@ -321,6 +325,7 @@ func runMultiSourceCopy(
 				Stats:          collector,
 				SrcEndpoint:    srcEP,
 				DstEndpoint:    dstEP,
+				DstIndex:       dstIndex,
 			}
 
 			scanner := NewScanner(scanCfg)
@@ -508,6 +513,44 @@ func runFileCopy(
 		Stats: collector.Snapshot(),
 		Err:   copyErr,
 	}
+}
+
+// buildDstIndex pre-walks the destination to build a lookup table for skip
+// detection. For beam endpoints, this replaces N per-file Stat RPCs with a
+// single streaming Walk RPC. Returns nil for local endpoints where per-file
+// Stat is cheap.
+func buildDstIndex(
+	ep transport.WriteEndpoint,
+	dstBase string,
+) map[string]transport.FileEntry {
+	beamEP, ok := ep.(*beam.WriteEndpoint)
+	if !ok {
+		return nil // local endpoints: per-file Stat is fast enough
+	}
+
+	// Compute the subtree to walk relative to the beam endpoint root.
+	subDir, err := filepath.Rel(beamEP.Root(), dstBase)
+	if err != nil {
+		slog.Debug("buildDstIndex: rel path failed",
+			"root", beamEP.Root(), "dstBase", dstBase, "error", err)
+		return nil
+	}
+	if subDir == "." {
+		subDir = ""
+	}
+
+	index := make(map[string]transport.FileEntry)
+	if err := beamEP.WalkSubtree(subDir, func(entry transport.FileEntry) error {
+		index[entry.RelPath] = entry
+		return nil
+	}); err != nil {
+		// Walk failed (e.g. destination doesn't exist yet) — fall back to per-file Stat.
+		slog.Debug("buildDstIndex: walk failed, falling back to per-file stat", "error", err)
+		return nil
+	}
+
+	slog.Debug("buildDstIndex", "entries", len(index), "subDir", subDir)
+	return index
 }
 
 func fileInfoToTask(srcPath, dstPath string, info os.FileInfo) (FileTask, error) {

@@ -8,12 +8,20 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
-	"time"
+	"sync/atomic"
 
-	"github.com/google/uuid"
+	"golang.org/x/sys/unix"
 
 	"github.com/bamsammich/beam/internal/transport"
 )
+
+// batchFileSeq is an atomic counter for generating unique temp file names
+// within batch writes, replacing per-file UUID generation.
+var batchFileSeq atomic.Uint64
+
+// batchWriteParallel is the number of concurrent goroutines used to process
+// files within a single batch write request on the server.
+const batchWriteParallel = 16
 
 // Handler dispatches incoming protocol frames to endpoint operations.
 // One Handler is created per client connection.
@@ -52,7 +60,7 @@ func (h *Handler) dispatch(streamID uint32, f Frame) error {
 	switch f.MsgType {
 	// ReadEndpoint operations.
 	case MsgWalkReq:
-		return h.handleWalk(streamID)
+		return h.handleWalk(streamID, f.Payload)
 	case MsgStatReq:
 		return h.handleStat(streamID, f.Payload)
 	case MsgReadDirReq:
@@ -105,12 +113,74 @@ func (h *Handler) dispatch(streamID uint32, f Frame) error {
 	}
 }
 
-func (h *Handler) handleWalk(streamID uint32) error {
+func (h *Handler) handleWalk(streamID uint32, data []byte) error {
+	var req WalkReq
+	if len(data) > 0 {
+		if _, err := req.UnmarshalMsg(data); err != nil {
+			return fmt.Errorf("decode WalkReq: %w", err)
+		}
+	}
+
+	// If RelPath is set, walk just that subtree using direct filesystem access.
+	// Entry RelPaths in the response are relative to the walk root.
+	if req.RelPath != "" {
+		return h.handleWalkSubtree(streamID, req.RelPath)
+	}
+
 	err := h.read.Walk(func(entry transport.FileEntry) error {
 		msg := WalkEntry{Entry: FromFileEntry(entry)}
 		payload, err := msg.MarshalMsg(nil)
 		if err != nil {
 			return err
+		}
+		return h.mux.Send(Frame{StreamID: streamID, MsgType: MsgWalkEntry, Payload: payload})
+	})
+	if err != nil {
+		return err
+	}
+
+	end := WalkEnd{}
+	payload, err := end.MarshalMsg(nil)
+	if err != nil {
+		return err
+	}
+	return h.mux.Send(Frame{StreamID: streamID, MsgType: MsgWalkEnd, Payload: payload})
+}
+
+//nolint:revive // cognitive-complexity: subtree walk with stat and entry emission
+func (h *Handler) handleWalkSubtree(streamID uint32, relPath string) error {
+	root := filepath.Join(h.read.Root(), relPath)
+
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return nil // skip inaccessible entries
+		}
+		entryRel, relErr := filepath.Rel(root, path)
+		if relErr != nil || entryRel == "." {
+			return nil
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil {
+			return nil
+		}
+		entry := transport.FileEntry{
+			RelPath: entryRel,
+			Size:    info.Size(),
+			Mode:    info.Mode(),
+			ModTime: info.ModTime(),
+			IsDir:   info.IsDir(),
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			entry.IsSymlink = true
+			if target, err := os.Readlink(path); err == nil {
+				entry.LinkTarget = target
+			}
+		}
+
+		msg := WalkEntry{Entry: FromFileEntry(entry)}
+		payload, marshalErr := msg.MarshalMsg(nil)
+		if marshalErr != nil {
+			return marshalErr
 		}
 		return h.mux.Send(Frame{StreamID: streamID, MsgType: MsgWalkEntry, Payload: payload})
 	})
@@ -517,21 +587,45 @@ func (h *Handler) handleWriteFileBatch(streamID uint32, data []byte) error {
 	}
 
 	opts := ToMetadataOpts(req.Opts)
-	results := make([]WriteFileBatchResult, len(req.Entries))
-	for i, entry := range req.Entries {
-		if err := h.writeOneFile(entry, opts); err != nil {
-			results[i] = WriteFileBatchResult{
-				RelPath: entry.RelPath,
-				OK:      false,
-				Error:   err.Error(),
-			}
-		} else {
-			results[i] = WriteFileBatchResult{
-				RelPath: entry.RelPath,
-				OK:      true,
-			}
+	root := h.write.Root()
+
+	// Pre-create all unique parent directories before parallel file writes.
+	dirs := make(map[string]struct{})
+	for _, e := range req.Entries {
+		dir := filepath.Dir(filepath.Join(root, e.RelPath))
+		dirs[dir] = struct{}{}
+	}
+	for dir := range dirs {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			slog.Debug("batch mkdir", "dir", dir, "error", err)
 		}
 	}
+
+	// Process entries in parallel with bounded concurrency.
+	results := make([]WriteFileBatchResult, len(req.Entries))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, batchWriteParallel)
+
+	for i, entry := range req.Entries {
+		sem <- struct{}{} // backpressure: block until a slot opens
+		idx, e := i, entry
+		wg.Go(func() {
+			defer func() { <-sem }()
+			if err := batchWriteOneFile(root, e, opts); err != nil {
+				results[idx] = WriteFileBatchResult{
+					RelPath: e.RelPath,
+					OK:      false,
+					Error:   err.Error(),
+				}
+			} else {
+				results[idx] = WriteFileBatchResult{
+					RelPath: e.RelPath,
+					OK:      true,
+				}
+			}
+		})
+	}
+	wg.Wait()
 
 	resp := WriteFileBatchResp{Results: results}
 	payload, err := resp.MarshalMsg(nil)
@@ -541,24 +635,20 @@ func (h *Handler) handleWriteFileBatch(streamID uint32, data []byte) error {
 	return h.mux.Send(Frame{StreamID: streamID, MsgType: MsgWriteFileBatchResp, Payload: payload})
 }
 
-// writeOneFile atomically writes a single small file: mkdir parent, create temp,
-// write data, close, set metadata, rename. Temp file is cleaned up on failure.
-func (h *Handler) writeOneFile(entry WriteFileBatchEntry, opts transport.MetadataOpts) error {
-	// Ensure parent directory exists.
-	relDir := filepath.Dir(entry.RelPath)
-	if relDir != "." {
-		if err := h.write.MkdirAll(relDir, 0755); err != nil {
-			return fmt.Errorf("mkdir %s: %w", relDir, err)
-		}
-	}
-
-	// Create temp file.
-	absPath := filepath.Join(h.write.Root(), entry.RelPath)
+// batchWriteOneFile atomically writes a single small file using direct
+// syscalls for efficiency: create temp, write data, set metadata via fd,
+// close, rename. Parent directories must already exist (pre-created by
+// handleWriteFileBatch).
+//
+//nolint:gocyclo,revive // cyclomatic: create + write + fd-metadata + close + rename with error handling
+func batchWriteOneFile(root string, entry WriteFileBatchEntry, opts transport.MetadataOpts) error {
+	absPath := filepath.Join(root, entry.RelPath)
 	dir := filepath.Dir(absPath)
 	base := filepath.Base(absPath)
-	tmpName := fmt.Sprintf(".%s.%s.beam-tmp", base, uuid.New().String()[:8])
-	tmpPath := filepath.Join(dir, tmpName)
-	tmpRelPath := relPathFromRoot(h.write.Root(), tmpPath)
+
+	// Atomic counter for temp names (cheaper than UUID generation).
+	seq := batchFileSeq.Add(1)
+	tmpPath := filepath.Join(dir, fmt.Sprintf(".%s.%x.beam-tmp", base, seq))
 
 	perm := os.FileMode(entry.Perm)
 	if perm == 0 {
@@ -569,9 +659,12 @@ func (h *Handler) writeOneFile(entry WriteFileBatchEntry, opts transport.Metadat
 	if err != nil {
 		return fmt.Errorf("create temp: %w", err)
 	}
+
+	success := false
 	defer func() {
-		// Best-effort cleanup on failure: remove temp if it still exists.
-		os.Remove(tmpPath) //nolint:errcheck // best-effort cleanup of temp file on failure
+		if !success {
+			os.Remove(tmpPath) //nolint:errcheck // best-effort cleanup on failure
+		}
 	}()
 
 	// Write data.
@@ -579,38 +672,41 @@ func (h *Handler) writeOneFile(entry WriteFileBatchEntry, opts transport.Metadat
 		f.Close()
 		return fmt.Errorf("write data: %w", err)
 	}
+
+	// Set metadata via fd-based syscalls (avoids extra path lookups).
+	rawFd := int(f.Fd()) //nolint:gosec // G115: fd conversion safe for file descriptors
+	if opts.Mode {
+		if err := unix.Fchmod(rawFd, entry.Mode&0o7777); err != nil {
+			f.Close()
+			return fmt.Errorf("fchmod: %w", err)
+		}
+	}
+	if opts.Times {
+		atime := unix.NsecToTimespec(entry.AccTime)
+		mtime := unix.NsecToTimespec(entry.ModTime)
+		if err := unix.UtimesNanoAt(
+			unix.AT_FDCWD, tmpPath, []unix.Timespec{atime, mtime}, 0,
+		); err != nil {
+			f.Close()
+			return fmt.Errorf("utimensat: %w", err)
+		}
+	}
+	if opts.Owner {
+		//nolint:errcheck,gosec // best-effort; may fail without CAP_CHOWN; uid/gid widening safe
+		_ = unix.Fchown(rawFd, int(entry.UID), int(entry.GID))
+	}
+
 	if err := f.Close(); err != nil {
 		return fmt.Errorf("close temp: %w", err)
 	}
 
-	// Set metadata.
-	fe := transport.FileEntry{
-		Mode:    os.FileMode(entry.Mode),
-		ModTime: time.Unix(0, entry.ModTime),
-		AccTime: time.Unix(0, entry.AccTime),
-		UID:     entry.UID,
-		GID:     entry.GID,
-	}
-	if err := h.write.SetMetadata(tmpRelPath, fe, opts); err != nil {
-		return fmt.Errorf("set metadata: %w", err)
-	}
-
 	// Atomic rename.
-	if err := h.write.Rename(tmpRelPath, entry.RelPath); err != nil {
+	if err := os.Rename(tmpPath, absPath); err != nil {
 		return fmt.Errorf("rename: %w", err)
 	}
 
-	// Success — prevent deferred cleanup from removing the renamed file.
-	// The deferred os.Remove will harmlessly fail since tmpPath no longer exists.
+	success = true
 	return nil
-}
-
-func relPathFromRoot(root, absPath string) string {
-	rel, err := filepath.Rel(root, absPath)
-	if err != nil {
-		return absPath
-	}
-	return rel
 }
 
 func (h *Handler) sendAck(streamID uint32) error {

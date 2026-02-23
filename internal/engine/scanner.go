@@ -21,9 +21,10 @@ import (
 type ScannerConfig struct {
 	Events         chan<- event.Event
 	Filter         *filter.Chain
-	Stats          stats.Writer            // if set, skipped-file stats are recorded directly
-	SrcEndpoint    transport.ReadEndpoint  // nil = local filesystem
-	DstEndpoint    transport.WriteEndpoint // nil = local filesystem
+	Stats          stats.Writer                   // if set, skipped-file stats are recorded directly
+	SrcEndpoint    transport.ReadEndpoint         // nil = local filesystem
+	DstEndpoint    transport.WriteEndpoint        // nil = local filesystem
+	DstIndex       map[string]transport.FileEntry // pre-populated destination index (avoids per-file Stat RPCs)
 	SrcRoot        string
 	DstRoot        string
 	ChunkThreshold int64
@@ -237,12 +238,21 @@ func (s *Scanner) processRegular(
 	mode := info.Mode()
 
 	// Skip files where the destination already exists with matching
-	// size and mtime.
+	// size and mtime. When DstIndex is set, check it (O(1) local map lookup)
+	// instead of making per-file Stat RPCs.
 	relDst, err := filepath.Rel(s.cfg.DstRoot, dstPath)
 	if err != nil {
 		return fmt.Errorf("rel path %s: %w", dstPath, err)
 	}
-	if dstEntry, statErr := s.cfg.DstEndpoint.Stat(relDst); statErr == nil {
+	var dstEntry transport.FileEntry
+	var dstFound bool
+	if s.cfg.DstIndex != nil {
+		dstEntry, dstFound = s.cfg.DstIndex[relDst]
+	} else {
+		dstEntry, err = s.cfg.DstEndpoint.Stat(relDst)
+		dstFound = err == nil
+	}
+	if dstFound {
 		if dstEntry.Size == info.Size() && dstEntry.ModTime.Equal(info.ModTime()) {
 			relPath, relErr := filepath.Rel(s.cfg.SrcRoot, srcPath)
 			if relErr != nil {

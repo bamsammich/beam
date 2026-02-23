@@ -141,7 +141,7 @@ func dialBeamReadEndpoint(t *testing.T, addr, token, root string) *beam.ReadEndp
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 
-	return beam.NewReadEndpoint(mux, root, caps)
+	return beam.NewReadEndpoint(mux, root, root, caps)
 }
 
 // dialBeamWriteEndpoint dials a beam daemon and returns a WriteEndpoint.
@@ -153,7 +153,7 @@ func dialBeamWriteEndpoint(t *testing.T, addr, token, root string) *beam.WriteEn
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 
-	return beam.NewWriteEndpoint(mux, root, caps)
+	return beam.NewWriteEndpoint(mux, root, root, caps)
 }
 
 // createModifiedTestTree creates a test tree at root that is slightly

@@ -108,6 +108,10 @@ All beam protocol messages use msgpack map encoding (field names as string keys,
 
 When transferring to a `beam://` destination, small regular files (< 64KB) are accumulated by the batcher into batches of up to 100 files / 4MB total. Each batch is sent as a single `WriteFileBatchReq` RPC (message type 0x33), processed atomically per-file on the server, and returns per-file results in `WriteFileBatchResp` (0x34). This reduces per-file round-trips from 5 to 1/N.
 
+### Path Translation & Destination Index
+
+Beam endpoints translate between client-relative and server-relative paths using a `pathPrefix` computed from the daemon root (obtained during handshake) and the user-specified path. Before scanning, the engine pre-walks the destination via a streaming `Walk` RPC (with subtree support via `WalkReq.RelPath`) and builds a `DstIndex` map for O(1) skip detection, eliminating per-file `Stat` RPCs over the network.
+
 ### TCP/Mux Optimizations
 
 - `TCP_NODELAY` is set on all beam connections
@@ -155,6 +159,7 @@ All initial phases are implemented:
 - **Phase 6c** — Server-side delta transfer: ComputeSignature/MatchBlocks/ApplyDelta RPCs, push/pull/beam-to-beam delta
 - **Phase 7** — Polish: `--bwlimit`, `--benchmark`, JSON logging, man pages, CI/CD
 - **Batch RPC** — WriteFileBatchReq/Resp for small-file batching, TCP/mux optimizations
+- **Path fix + DstIndex** — Beam endpoint path translation, subtree Walk, pre-built destination index for skip detection
 
 ### Next Up
 - **Phase 6d** — SSH beam auto-detection
@@ -164,7 +169,6 @@ All initial phases are implemented:
 
 - **`--bwlimit` has no effect on local copies.** The kernel fast paths (`copy_file_range`, `sendfile`) bypass userspace entirely, so the `rate.Limiter` wrapping `io.Reader`/`io.Writer` is never hit. Fix: when `--bwlimit` is set, skip the kernel fast path and fall back to the userspace read/write loop where the limiter lives.
 - **VHS demo GIFs need re-recording.** The current inline and TUI demo GIFs complete too fast to show the HUD. Re-record after bwlimit is fixed for local copies, or use a real network transfer between two machines.
-- **Network benchmarks missing from README.** The README benchmark section only covers local transfers. Add a network benchmark table once beam is deployed on a second machine.
 
 ---
 
