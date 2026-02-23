@@ -268,7 +268,7 @@ func (wp *WorkerPool) createHardlink(task FileTask, workerID int) error {
 }
 
 //nolint:revive // cyclomatic: atomic write, metadata, hardlink, xattr, ownership — irreducible
-func (wp *WorkerPool) copyRegularFile(_ context.Context, task FileTask, workerID int) error {
+func (wp *WorkerPool) copyRegularFile(ctx context.Context, task FileTask, workerID int) error {
 	wp.cfg.Stats.AddFilesScanned(1)
 	wp.emit(
 		event.Event{
@@ -336,8 +336,9 @@ func (wp *WorkerPool) copyRegularFile(_ context.Context, task FileTask, workerID
 
 	// Copy data.
 	var totalBytes int64
+	var bytesReported bool
 	if task.Size > 0 {
-		totalBytes, err = wp.copyFileData(task, tmpFile)
+		totalBytes, bytesReported, err = wp.copyFileData(ctx, task, tmpFile)
 		if err != nil {
 			tmpFile.Close()
 			wp.cfg.Stats.AddFilesFailed(1)
@@ -400,7 +401,9 @@ func (wp *WorkerPool) copyRegularFile(_ context.Context, task FileTask, workerID
 	}
 
 	wp.cfg.Stats.AddFilesCopied(1)
-	wp.cfg.Stats.AddBytesCopied(totalBytes)
+	if !bytesReported {
+		wp.cfg.Stats.AddBytesCopied(totalBytes)
+	}
 	wp.emit(
 		event.Event{
 			Type:     event.FileCompleted,
@@ -418,18 +421,27 @@ func (wp *WorkerPool) copyRegularFile(_ context.Context, task FileTask, workerID
 // offload (copy_file_range, sendfile, io_uring). Otherwise it streams via
 // io.Copy, with optional delta transfer for remote destinations.
 //
+// Returns (bytesWritten, bytesReported, error). When bytesReported is true,
+// bytes have already been reported to stats incrementally via progressWriter
+// and the caller should NOT call AddBytesCopied again.
+//
 //nolint:gocyclo,revive // cyclomatic: strategy selection — local fast-path, beam push/pull delta, legacy delta, stream
-func (wp *WorkerPool) copyFileData(task FileTask, tmpFile transport.WriteFile) (int64, error) {
+func (wp *WorkerPool) copyFileData(
+	ctx context.Context,
+	task FileTask,
+	tmpFile transport.WriteFile,
+) (int64, bool, error) {
 	// Local fast-path: extract raw fd for kernel copy offload.
 	if dstFd := transport.LocalFile(tmpFile); dstFd != nil && wp.localFast {
-		return wp.copyDataLocal(task, dstFd)
+		n, err := wp.copyDataLocal(task, dstFd)
+		return n, false, err
 	}
 
 	// Delta transfer: when enabled and a basis file exists on the destination.
 	if wp.cfg.Delta && task.Size >= transport.DeltaMinFileSize() {
 		relDst, relErr := wp.relDst(task.DstPath)
 		if relErr != nil {
-			return 0, fmt.Errorf("rel path %s: %w", task.DstPath, relErr)
+			return 0, false, fmt.Errorf("rel path %s: %w", task.DstPath, relErr)
 		}
 
 		// Beam push-delta: dst is beam.WriteEndpoint with DeltaTransfer cap.
@@ -439,7 +451,7 @@ func (wp *WorkerPool) copyFileData(task FileTask, tmpFile transport.WriteFile) (
 			if dstEntry, err := beamDst.Stat(relDst); err == nil && dstEntry.Size > 0 {
 				n, err := wp.copyDataBeamPushDelta(task, beamDst, tmpFile.Name())
 				if err == nil {
-					return n, nil
+					return n, false, nil
 				}
 				// Fall through on error.
 			}
@@ -451,7 +463,7 @@ func (wp *WorkerPool) copyFileData(task FileTask, tmpFile transport.WriteFile) (
 			if info, err := os.Stat(task.DstPath); err == nil && info.Size() > 0 {
 				n, err := wp.copyDataBeamPullDelta(task, beamSrc, tmpFile)
 				if err == nil {
-					return n, nil
+					return n, false, nil
 				}
 				// Fall through on error.
 			}
@@ -459,9 +471,9 @@ func (wp *WorkerPool) copyFileData(task FileTask, tmpFile transport.WriteFile) (
 
 		// Legacy push-delta (SFTP or non-beam endpoints).
 		if dstEntry, err := wp.cfg.DstEndpoint.Stat(relDst); err == nil && dstEntry.Size > 0 {
-			n, err := wp.copyDataDelta(task, tmpFile, relDst)
+			n, err := wp.copyDataDelta(ctx, task, tmpFile, relDst)
 			if err == nil {
-				return n, nil
+				return n, false, nil
 			}
 			// Delta failed — fall through to full stream copy.
 		}
@@ -470,21 +482,22 @@ func (wp *WorkerPool) copyFileData(task FileTask, tmpFile transport.WriteFile) (
 	// Stream path: read from source endpoint, write to dest file.
 	relSrc, err := filepath.Rel(wp.cfg.SrcEndpoint.Root(), task.SrcPath)
 	if err != nil {
-		return 0, fmt.Errorf("rel src path %s: %w", task.SrcPath, err)
+		return 0, false, fmt.Errorf("rel src path %s: %w", task.SrcPath, err)
 	}
 	srcReader, err := wp.cfg.SrcEndpoint.OpenRead(relSrc)
 	if err != nil {
-		return 0, fmt.Errorf("open source %s: %w", relSrc, err)
+		return 0, false, fmt.Errorf("open source %s: %w", relSrc, err)
 	}
 	defer srcReader.Close()
 
-	var r io.Reader = srcReader
+	var r io.Reader = &contextReader{r: srcReader, ctx: ctx}
 	if wp.cfg.BWLimiter != nil {
-		r = newRateLimitedReader(context.Background(), srcReader, wp.cfg.BWLimiter)
+		r = newRateLimitedReader(ctx, r, wp.cfg.BWLimiter)
 	}
 
-	n, err := io.Copy(tmpFile, r)
-	return n, err
+	dst := &progressWriter{w: tmpFile, stats: wp.cfg.Stats}
+	n, err := io.Copy(dst, r)
+	return n, true, err
 }
 
 // copyDataDelta uses rsync-style delta transfer: compute signatures of the
@@ -493,6 +506,7 @@ func (wp *WorkerPool) copyFileData(task FileTask, tmpFile transport.WriteFile) (
 //
 //nolint:revive // cognitive-complexity: sequential sig→match→apply pipeline with bw limit wrapping
 func (wp *WorkerPool) copyDataDelta(
+	ctx context.Context,
 	task FileTask,
 	tmpFile transport.WriteFile,
 	relDst string,
@@ -545,7 +559,7 @@ func (wp *WorkerPool) copyDataDelta(
 
 	var w io.Writer = tmpFile
 	if wp.cfg.BWLimiter != nil {
-		w = &rateLimitedWriter{w: tmpFile, limiter: wp.cfg.BWLimiter, ctx: context.Background()}
+		w = &rateLimitedWriter{w: tmpFile, limiter: wp.cfg.BWLimiter, ctx: ctx}
 	}
 	countWriter := &countingWriter{w: w}
 	if err := transport.ApplyDelta(basisSeeker, ops, countWriter); err != nil {
@@ -667,6 +681,35 @@ func (cw *countingWriter) Write(p []byte) (int, error) {
 	n, err := cw.w.Write(p)
 	cw.n += int64(n)
 	return n, err
+}
+
+// progressWriter wraps an io.Writer and reports bytes to stats incrementally.
+type progressWriter struct {
+	w     io.Writer
+	stats stats.Writer
+}
+
+func (pw *progressWriter) Write(p []byte) (int, error) {
+	n, err := pw.w.Write(p)
+	if n > 0 {
+		pw.stats.AddBytesCopied(int64(n))
+	}
+	return n, err
+}
+
+// contextReader wraps an io.Reader and returns ctx.Err() when the context is cancelled.
+type contextReader struct {
+	r   io.Reader
+	ctx context.Context
+}
+
+func (cr *contextReader) Read(p []byte) (int, error) {
+	select {
+	case <-cr.ctx.Done():
+		return 0, cr.ctx.Err()
+	default:
+	}
+	return cr.r.Read(p)
 }
 
 // copyDataLocal copies file data using platform fast-paths (copy_file_range,
@@ -874,12 +917,12 @@ func taskToEntry(task FileTask) transport.FileEntry {
 // file events are emitted for stats/UI rendering.
 //
 //nolint:gocyclo,revive // cyclomatic: batch assembly + per-file error handling + stats emit
-func (wp *WorkerPool) processBatch(_ context.Context, task FileTask, workerID int) error {
+func (wp *WorkerPool) processBatch(ctx context.Context, task FileTask, workerID int) error {
 	beamDst, ok := wp.cfg.DstEndpoint.(*beam.WriteEndpoint)
 	if !ok {
 		// Fallback: process each file individually if not a beam endpoint.
 		for _, ft := range task.BatchFiles {
-			if err := wp.copyRegularFile(context.Background(), ft, workerID); err != nil {
+			if err := wp.copyRegularFile(ctx, ft, workerID); err != nil {
 				return err
 			}
 		}
