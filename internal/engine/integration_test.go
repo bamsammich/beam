@@ -66,6 +66,57 @@ func TestIntegration_LocalToBeam(t *testing.T) {
 	verifyTreeCopy(t, srcDir, dstDir)
 }
 
+// TestIntegration_BeamToLocal_NonLocalPath verifies that beam sources work when
+// the source path does not exist on the local filesystem — the path only exists
+// on the remote daemon. This is the primary regression test for the bug where
+// resolveSources called os.Lstat on remote paths.
+//
+// Setup: daemon serves parentDir (which contains data/). The endpoint is
+// configured with a fictional root ("/nonexistent-beam-test/data") and a
+// matching fictional daemonRoot ("/nonexistent-beam-test") so that
+// pathPrefix = "data", which maps correctly to parentDir/data/ on the daemon.
+func TestIntegration_BeamToLocal_NonLocalPath(t *testing.T) {
+	t.Parallel()
+
+	// Guard: skip if our fictional path accidentally exists.
+	if _, err := os.Lstat("/nonexistent-beam-test"); err == nil {
+		t.Skip("/nonexistent-beam-test exists on this system, skipping")
+	}
+
+	parentDir := t.TempDir()
+	dataDir := filepath.Join(parentDir, "data")
+	require.NoError(t, os.MkdirAll(dataDir, 0o755))
+
+	createTestTree(t, dataDir)
+
+	dstDir := t.TempDir()
+
+	// Start daemon serving parentDir (data lives at parentDir/data/).
+	addr, token := startTestDaemon(t, parentDir)
+
+	// Create a beam ReadEndpoint that simulates a remote source path that
+	// does NOT exist locally. pathPrefix = Rel("/nonexistent-beam-test",
+	// "/nonexistent-beam-test/data") = "data", which the daemon resolves
+	// to parentDir/data/.
+	srcEP := dialBeamReadEndpointCustomRoots(t, addr, token,
+		"/nonexistent-beam-test/data", "/nonexistent-beam-test")
+
+	result := engine.Run(context.Background(), engine.Config{
+		Sources:     []string{"/nonexistent-beam-test/data/"},
+		Dst:         dstDir,
+		Archive:     true,
+		Recursive:   true,
+		Workers:     2,
+		Events:      drainEvents(t),
+		SrcEndpoint: srcEP,
+	})
+
+	require.NoError(t, result.Err)
+	require.GreaterOrEqual(t, result.Stats.FilesCopied, int64(4))
+
+	verifyTreeCopy(t, dataDir, dstDir)
+}
+
 func TestIntegration_BeamToBeam(t *testing.T) {
 	t.Parallel()
 

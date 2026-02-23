@@ -72,6 +72,13 @@ func (s *Scanner) Scan(ctx context.Context) (<-chan FileTask, <-chan error) {
 func (s *Scanner) scanTree(ctx context.Context) {
 	s.emit(event.Event{Type: event.ScanStarted})
 
+	// Remote sources: use endpoint Walk (single streaming RPC) instead of
+	// parallel os.ReadDir which would fail for non-local paths.
+	if _, isLocal := s.cfg.SrcEndpoint.(*transport.LocalReadEndpoint); !isLocal {
+		s.scanTreeRemote(ctx)
+		return
+	}
+
 	workQueue := make(chan string, s.cfg.Workers*2)
 	var outstanding sync.WaitGroup // tracks directories queued but not yet processed
 
@@ -97,6 +104,122 @@ func (s *Scanner) scanTree(ctx context.Context) {
 	outstanding.Wait()
 	close(workQueue)
 	workerWg.Wait()
+}
+
+// scanTreeRemote walks the source tree via SrcEndpoint.Walk() for remote
+// sources (beam://, SFTP). This replaces the parallel os.ReadDir scanner
+// with a single streaming RPC.
+//
+//nolint:revive // cognitive-complexity: type-switch dispatch with filter, skip detection, and task emission
+func (s *Scanner) scanTreeRemote(ctx context.Context) {
+	err := s.cfg.SrcEndpoint.Walk(func(entry transport.FileEntry) error {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+
+		srcPath := filepath.Join(s.cfg.SrcRoot, entry.RelPath)
+		dstPath := filepath.Join(s.cfg.DstRoot, entry.RelPath)
+
+		// Apply filter if configured.
+		if s.cfg.Filter != nil {
+			if !s.cfg.Filter.Match(entry.RelPath, entry.IsDir, entry.Size) {
+				s.emit(event.Event{Type: event.FileSkipped, Path: entry.RelPath, Size: entry.Size})
+				return nil
+			}
+		}
+
+		switch {
+		case entry.IsDir:
+			s.sendTask(FileTask{
+				SrcPath: srcPath,
+				DstPath: dstPath,
+				Type:    Dir,
+				Mode:    uint32(entry.Mode),
+				UID:     entry.UID,
+				GID:     entry.GID,
+				ModTime: entry.ModTime,
+				AccTime: entry.AccTime,
+			})
+
+		case entry.IsSymlink:
+			s.sendTask(FileTask{
+				SrcPath:    srcPath,
+				DstPath:    dstPath,
+				Type:       Symlink,
+				Mode:       uint32(entry.Mode),
+				UID:        entry.UID,
+				GID:        entry.GID,
+				ModTime:    entry.ModTime,
+				AccTime:    entry.AccTime,
+				LinkTarget: entry.LinkTarget,
+			})
+
+		case entry.Mode.IsRegular():
+			if err := s.processRegularRemote(srcPath, dstPath, entry); err != nil {
+				s.sendErr(err)
+			}
+		}
+
+		return nil
+	})
+	if err != nil && ctx.Err() == nil {
+		s.sendErr(fmt.Errorf("remote walk: %w", err))
+	}
+}
+
+// processRegularRemote handles skip detection and task emission for a regular
+// file discovered via remote Walk. Unlike processRegular, it does not perform
+// sparse detection or hardlink tracking (no local fd / unreliable across transports).
+func (s *Scanner) processRegularRemote(
+	srcPath, dstPath string,
+	entry transport.FileEntry,
+) error {
+	// Skip detection using DstIndex or DstEndpoint.Stat().
+	relDst, err := filepath.Rel(s.cfg.DstRoot, dstPath)
+	if err != nil {
+		return fmt.Errorf("rel path %s: %w", dstPath, err)
+	}
+
+	var dstEntry transport.FileEntry
+	var dstFound bool
+	if s.cfg.DstIndex != nil {
+		dstEntry, dstFound = s.cfg.DstIndex[relDst]
+	} else {
+		dstEntry, err = s.cfg.DstEndpoint.Stat(relDst)
+		dstFound = err == nil
+	}
+
+	if dstFound && dstEntry.Size == entry.Size && dstEntry.ModTime.Equal(entry.ModTime) {
+		s.emit(event.Event{Type: event.FileSkipped, Path: entry.RelPath, Size: entry.Size})
+		if s.cfg.Stats != nil {
+			s.cfg.Stats.AddFilesSkipped(1)
+			s.cfg.Stats.AddBytesCopied(entry.Size)
+		}
+		return nil
+	}
+
+	var chunks []Chunk
+	if s.cfg.ChunkThreshold > 0 && entry.Size > s.cfg.ChunkThreshold {
+		chunks = splitIntoChunks(entry.Size, s.cfg.ChunkThreshold)
+	}
+
+	s.totalFiles.Add(1)
+	s.totalBytes.Add(entry.Size)
+	s.sendTask(FileTask{
+		SrcPath: srcPath,
+		DstPath: dstPath,
+		Type:    Regular,
+		Size:    entry.Size,
+		Mode:    uint32(entry.Mode),
+		UID:     entry.UID,
+		GID:     entry.GID,
+		ModTime: entry.ModTime,
+		AccTime: entry.AccTime,
+		Chunks:  chunks,
+	})
+	return nil
 }
 
 //nolint:revive // cognitive-complexity: directory scan with stat, filter, and task emission

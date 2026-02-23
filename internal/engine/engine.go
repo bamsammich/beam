@@ -68,9 +68,9 @@ type Result struct {
 // resolvedSource represents a single source after resolving trailing-slash
 // semantics and computing the destination base path.
 type resolvedSource struct {
-	info         os.FileInfo
 	srcPath      string // absolute, cleaned path
 	dstBase      string // computed destination for this source
+	entry        transport.FileEntry
 	isFile       bool
 	copyContents bool // trailing slash on dir = copy contents, not dir itself
 }
@@ -81,8 +81,17 @@ type resolvedSource struct {
 //   - dir   → copy dir itself into dst (creates dst/dir/)
 //   - file  → copy file into dst
 //
+// When srcEP is non-nil (remote source), it is used to stat the source
+// instead of os.Lstat, which would fail for paths that only exist on the
+// remote machine.
+//
 //nolint:revive // cognitive-complexity: rsync-compatible source resolution with trailing-slash semantics
-func resolveSources(sources []string, dst string, recursive bool) ([]resolvedSource, error) {
+func resolveSources(
+	sources []string,
+	dst string,
+	recursive bool,
+	srcEP transport.ReadEndpoint,
+) ([]resolvedSource, error) {
 	resolved := make([]resolvedSource, 0, len(sources))
 
 	for _, raw := range sources {
@@ -91,18 +100,45 @@ func resolveSources(sources []string, dst string, recursive bool) ([]resolvedSou
 			strings.HasSuffix(raw, "/")
 
 		cleaned := filepath.Clean(raw)
-		info, err := os.Lstat(cleaned)
-		if err != nil {
-			return nil, fmt.Errorf("source: %w", err)
+
+		var entry transport.FileEntry
+		if srcEP != nil {
+			// Remote source: stat via endpoint ("." = endpoint root = source path).
+			var err error
+			entry, err = srcEP.Stat(".")
+			if err != nil {
+				return nil, fmt.Errorf("source: %w", err)
+			}
+		} else {
+			// Local source: stat via filesystem.
+			info, err := os.Lstat(cleaned)
+			if err != nil {
+				return nil, fmt.Errorf("source: %w", err)
+			}
+			entry = transport.FileEntry{
+				Size:      info.Size(),
+				Mode:      info.Mode(),
+				ModTime:   info.ModTime(),
+				IsDir:     info.IsDir(),
+				IsSymlink: info.Mode()&os.ModeSymlink != 0,
+			}
+			if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+				entry.UID = stat.Uid
+				entry.GID = stat.Gid
+				entry.AccTime = atimeFromStat(stat)
+				entry.Nlink = uint32(stat.Nlink) //nolint:gosec // G115: nlink fits in uint32
+				entry.Ino = stat.Ino
+				entry.Dev = devFromStat(stat)
+			}
 		}
 
 		rs := resolvedSource{
 			srcPath: cleaned,
-			info:    info,
-			isFile:  !info.IsDir(),
+			entry:   entry,
+			isFile:  !entry.IsDir,
 		}
 
-		if info.IsDir() {
+		if entry.IsDir {
 			if !recursive {
 				return nil, fmt.Errorf("source %s is a directory (use -r or -a)", cleaned)
 			}
@@ -146,7 +182,7 @@ func Run(ctx context.Context, cfg Config) Result {
 	// Archive implies recursive + all preserve flags.
 	recursive := cfg.Recursive || cfg.Archive
 
-	resolved, err := resolveSources(cfg.Sources, cfg.Dst, recursive)
+	resolved, err := resolveSources(cfg.Sources, cfg.Dst, recursive, cfg.SrcEndpoint)
 	if err != nil {
 		return Result{Err: err}
 	}
@@ -215,10 +251,25 @@ func runMultiSourceCopy(
 	// Prescan all directory sources for progress totals.
 	var totalFiles, totalBytes int64
 	for _, rs := range sources {
-		if rs.isFile {
+		switch {
+		case rs.isFile:
 			totalFiles++
-			totalBytes += rs.info.Size()
-		} else {
+			totalBytes += rs.entry.Size
+		case cfg.SrcEndpoint != nil:
+			// Remote source: use endpoint Walk for prescan instead of local Prescan.
+			if err := cfg.SrcEndpoint.Walk(func(e transport.FileEntry) error {
+				if e.Mode.IsRegular() {
+					if cfg.Filter != nil && !cfg.Filter.Match(e.RelPath, false, e.Size) {
+						return nil
+					}
+					totalFiles++
+					totalBytes += e.Size
+				}
+				return nil
+			}); err != nil {
+				slog.Debug("remote prescan walk failed", "error", err)
+			}
+		default:
 			f, b := Prescan(ctx, rs.srcPath, cfg.Filter)
 			totalFiles += f
 			totalBytes += b
@@ -280,13 +331,16 @@ func runMultiSourceCopy(
 
 			if rs.isFile {
 				// File source: emit a single task directly.
-				task, err := fileInfoToTask(rs.srcPath, rs.dstBase, rs.info)
-				if err != nil {
-					select {
-					case allErrs <- err:
-					default:
+				task := fileEntryToTask(rs.srcPath, rs.dstBase, rs.entry)
+				if cfg.SrcEndpoint == nil && task.Size > 0 {
+					fd, openErr := os.Open(rs.srcPath)
+					if openErr == nil {
+						segments, sErr := DetectSparseSegments(fd, task.Size)
+						fd.Close()
+						if sErr == nil {
+							task.Segments = segments
+						}
 					}
-					continue
 				}
 				select {
 				case allTasks <- task:
@@ -493,9 +547,16 @@ func runFileCopy(
 	tasks := make(chan FileTask, 1)
 	errs := make(chan error, 1)
 
-	task, err := fileInfoToTask(rs.srcPath, dst, rs.info)
-	if err != nil {
-		return Result{Err: err}
+	task := fileEntryToTask(rs.srcPath, dst, rs.entry)
+	if cfg.SrcEndpoint == nil && task.Size > 0 {
+		fd, openErr := os.Open(rs.srcPath)
+		if openErr == nil {
+			segments, sErr := DetectSparseSegments(fd, task.Size)
+			fd.Close()
+			if sErr == nil {
+				task.Segments = segments
+			}
+		}
 	}
 
 	tasks <- task
@@ -553,36 +614,19 @@ func buildDstIndex(
 	return index
 }
 
-func fileInfoToTask(srcPath, dstPath string, info os.FileInfo) (FileTask, error) {
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok {
-		return FileTask{}, fmt.Errorf("unsupported stat type for %s", srcPath)
-	}
-
-	task := FileTask{
+// fileEntryToTask creates a FileTask from a transport.FileEntry.
+// Unlike fileInfoToTask, this does not perform sparse detection (no local fd
+// for remote files) and does not depend on syscall.Stat_t.
+func fileEntryToTask(srcPath, dstPath string, entry transport.FileEntry) FileTask {
+	return FileTask{
 		SrcPath: srcPath,
 		DstPath: dstPath,
 		Type:    Regular,
-		Size:    info.Size(),
-		Mode:    uint32(info.Mode()),
-		UID:     stat.Uid,
-		GID:     stat.Gid,
-		ModTime: info.ModTime(),
-		AccTime: atimeFromStat(stat),
+		Size:    entry.Size,
+		Mode:    uint32(entry.Mode),
+		UID:     entry.UID,
+		GID:     entry.GID,
+		ModTime: entry.ModTime,
+		AccTime: entry.AccTime,
 	}
-
-	// Detect sparse segments.
-	if info.Size() > 0 {
-		fd, err := os.Open(srcPath)
-		if err != nil {
-			return task, nil // proceed without sparse detection
-		}
-		segments, err := DetectSparseSegments(fd, info.Size())
-		fd.Close()
-		if err == nil {
-			task.Segments = segments
-		}
-	}
-
-	return task, nil
 }
