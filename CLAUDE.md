@@ -167,6 +167,7 @@ All initial phases are implemented:
 
 - **`--bwlimit` has no effect on local copies.** The kernel fast paths (`copy_file_range`, `sendfile`) bypass userspace entirely, so the `rate.Limiter` wrapping `io.Reader`/`io.Writer` is never hit. Fix: when `--bwlimit` is set, skip the kernel fast path and fall back to the userspace read/write loop where the limiter lives.
 - **VHS demo GIFs need re-recording.** The current inline and TUI demo GIFs complete too fast to show the HUD. Re-record after bwlimit is fixed for local copies, or use a real network transfer between two machines.
+- **`DialBeam`/`DialBeamConn`/`DialBeamTunnel` return 4 values.** This triggers `function-result-limit` lint errors (currently suppressed with `//nolint:revive`). Fix: introduce a `BeamConn` result struct (`Mux *proto.Mux`, `Root string`, `Caps transport.Capabilities`) so all three functions return `(BeamConn, error)`. Update all call sites in `endpoint.go`, `discover.go`, `endpoint_test.go`, `integration_test.go`, and `cmd/beam/main.go`.
 
 ---
 
