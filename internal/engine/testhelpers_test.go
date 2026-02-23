@@ -309,7 +309,7 @@ func findTmpFiles(t *testing.T, root string) []string {
 func verifyExistingFilesMatch(t *testing.T, srcRoot, dstRoot string) {
 	t.Helper()
 	err := filepath.WalkDir(dstRoot, func(path string, d os.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
+		if err != nil || d.IsDir() || d.Type()&os.ModeSymlink != 0 {
 			return err
 		}
 		rel, err := filepath.Rel(dstRoot, path)

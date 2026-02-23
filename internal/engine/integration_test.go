@@ -527,3 +527,167 @@ func TestIntegration_Verify(t *testing.T) {
 	}
 	require.True(t, foundCorrupt, "root.txt should appear in verification errors")
 }
+
+// testTreeByteSize is the exact sum of regular file bytes in createTestTree:
+//
+//	root.txt       = 17
+//	big.bin        = 320000  (16 × 20000)
+//	sub/mid.txt    = 19
+//	sub/deep/leaf.txt = 17
+//	link.txt       = symlink (0 copied bytes)
+const testTreeByteSize = 17 + 320000 + 19 + 17 // 320053
+
+// TestIntegration_ByteCount_LocalToLocal verifies that Stats.BytesCopied
+// exactly matches the total regular file bytes for a local-to-local copy.
+func TestIntegration_ByteCount_LocalToLocal(t *testing.T) {
+	t.Parallel()
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	createTestTree(t, srcDir)
+
+	result := engine.Run(context.Background(), engine.Config{
+		Sources:   []string{srcDir + "/"},
+		Dst:       dstDir,
+		Archive:   true,
+		Recursive: true,
+		Workers:   2,
+		Events:    drainEvents(t),
+	})
+
+	require.NoError(t, result.Err)
+	require.Equal(t, int64(testTreeByteSize), result.Stats.BytesCopied,
+		"BytesCopied must exactly match source file sizes (local→local)")
+}
+
+// TestIntegration_ByteCount_BeamToLocal verifies that Stats.BytesCopied
+// exactly matches the total regular file bytes when copying from a beam
+// source to a local destination. This is the path where progressWriter
+// reports bytes incrementally — no double-counting allowed.
+func TestIntegration_ByteCount_BeamToLocal(t *testing.T) {
+	t.Parallel()
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	createTestTree(t, srcDir)
+
+	addr, token := startTestDaemon(t, srcDir)
+	srcEP := dialBeamReadEndpoint(t, addr, token, srcDir)
+
+	result := engine.Run(context.Background(), engine.Config{
+		Sources:     []string{srcDir + "/"},
+		Dst:         dstDir,
+		Archive:     true,
+		Recursive:   true,
+		Workers:     2,
+		Events:      drainEvents(t),
+		SrcEndpoint: srcEP,
+	})
+
+	require.NoError(t, result.Err)
+	require.Equal(t, int64(testTreeByteSize), result.Stats.BytesCopied,
+		"BytesCopied must exactly match source file sizes (beam→local, progressWriter path)")
+	verifyTreeCopy(t, srcDir, dstDir)
+}
+
+// TestIntegration_ByteCount_LocalToBeam verifies that Stats.BytesCopied
+// exactly matches the total regular file bytes when copying from a local
+// source to a beam destination.
+func TestIntegration_ByteCount_LocalToBeam(t *testing.T) {
+	t.Parallel()
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	createTestTree(t, srcDir)
+
+	addr, token := startTestDaemon(t, dstDir)
+	dstEP := dialBeamWriteEndpoint(t, addr, token, dstDir)
+
+	result := engine.Run(context.Background(), engine.Config{
+		Sources:     []string{srcDir + "/"},
+		Dst:         dstDir,
+		Archive:     true,
+		Recursive:   true,
+		Workers:     2,
+		Events:      drainEvents(t),
+		DstEndpoint: dstEP,
+	})
+
+	require.NoError(t, result.Err)
+	require.Equal(t, int64(testTreeByteSize), result.Stats.BytesCopied,
+		"BytesCopied must exactly match source file sizes (local→beam)")
+	verifyTreeCopy(t, srcDir, dstDir)
+}
+
+// TestIntegration_ByteCount_BeamToBeam verifies that Stats.BytesCopied
+// exactly matches the total regular file bytes for a beam-to-beam copy.
+func TestIntegration_ByteCount_BeamToBeam(t *testing.T) {
+	t.Parallel()
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	createTestTree(t, srcDir)
+
+	srcAddr, srcToken := startTestDaemon(t, srcDir)
+	dstAddr, dstToken := startTestDaemon(t, dstDir)
+	srcEP := dialBeamReadEndpoint(t, srcAddr, srcToken, srcDir)
+	dstEP := dialBeamWriteEndpoint(t, dstAddr, dstToken, dstDir)
+
+	result := engine.Run(context.Background(), engine.Config{
+		Sources:     []string{srcDir + "/"},
+		Dst:         dstDir,
+		Archive:     true,
+		Recursive:   true,
+		Workers:     2,
+		Events:      drainEvents(t),
+		SrcEndpoint: srcEP,
+		DstEndpoint: dstEP,
+	})
+
+	require.NoError(t, result.Err)
+	require.Equal(t, int64(testTreeByteSize), result.Stats.BytesCopied,
+		"BytesCopied must exactly match source file sizes (beam→beam)")
+	verifyTreeCopy(t, srcDir, dstDir)
+}
+
+// TestIntegration_BeamToLocal_PathEscapePrevented verifies that a beam source
+// with a URL path outside the daemon root does NOT cause the daemon to walk
+// outside its root. The computePathPrefix function must return "" when
+// filepath.Rel(daemonRoot, root) would produce ".." components.
+//
+// Scenario: daemon serves /tmp/X, user connects with loc.Path="/".
+// Without the fix, pathPrefix = "../../.." which escapes the daemon root.
+// With the fix, pathPrefix = "" which maps to the daemon root.
+func TestIntegration_BeamToLocal_PathEscapePrevented(t *testing.T) {
+	t.Parallel()
+
+	srcDir := t.TempDir()
+	dstDir := t.TempDir()
+	createTestTree(t, srcDir)
+
+	// Start daemon serving srcDir (a specific subdirectory).
+	addr, token := startTestDaemon(t, srcDir)
+
+	// Simulate a client connecting with loc.Path="/" while daemon root is srcDir.
+	// Without the fix, computePathPrefix("/", srcDir) would produce "../../../..."
+	// which escapes the daemon root. With the fix, it produces "" (daemon root).
+	srcEP := dialBeamReadEndpointCustomRoots(t, addr, token, "/", srcDir)
+
+	result := engine.Run(context.Background(), engine.Config{
+		Sources:     []string{"/"},
+		Dst:         dstDir,
+		Archive:     true,
+		Recursive:   true,
+		Workers:     2,
+		Events:      drainEvents(t),
+		SrcEndpoint: srcEP,
+	})
+
+	require.NoError(t, result.Err)
+
+	// Should have copied exactly the daemon root's content (the test tree),
+	// NOT the entire filesystem.
+	require.Equal(t, int64(testTreeByteSize), result.Stats.BytesCopied,
+		"should only copy daemon root content, not escape to parent directories")
+	verifyTreeCopy(t, srcDir, dstDir)
+}

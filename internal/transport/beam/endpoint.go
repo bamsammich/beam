@@ -25,9 +25,17 @@ import (
 // Example: daemonRoot="/", root="/home/thudd/dst" → prefix="home/thudd/dst"
 // Then relPath "file.txt" → server sees "home/thudd/dst/file.txt" → resolves to
 // "/home/thudd/dst/file.txt" on the server.
+//
+// When root is outside the daemon root (Rel produces ".."), we return ""
+// to map to the daemon root itself. This handles the common case of
+// beam://token@host:port/ where loc.Path="/" and the daemon root is a
+// specific directory — the user wants the daemon's served content.
 func computePathPrefix(root, daemonRoot string) string {
 	rel, err := filepath.Rel(daemonRoot, root)
 	if err != nil || rel == "." {
+		return ""
+	}
+	if strings.HasPrefix(rel, "..") {
 		return ""
 	}
 	return rel
@@ -481,32 +489,38 @@ type beamReader struct {
 	done     bool
 }
 
+//nolint:revive // cyclomatic: select + switch for protocol dispatch with mux cancellation — irreducible
 func (r *beamReader) Read(p []byte) (int, error) {
 	for len(r.buf) == 0 {
 		if r.done {
 			return 0, io.EOF
 		}
 
-		f, ok := <-r.ch
-		if !ok {
-			r.done = true
-			return 0, io.EOF
-		}
-
-		switch f.MsgType {
-		case proto.MsgReadData:
-			var msg proto.ReadDataMsg
-			if _, err := msg.UnmarshalMsg(f.Payload); err != nil {
-				return 0, err
+		select {
+		case f, ok := <-r.ch:
+			if !ok {
+				r.done = true
+				return 0, io.EOF
 			}
-			r.buf = msg.Data
-		case proto.MsgReadDone:
+
+			switch f.MsgType {
+			case proto.MsgReadData:
+				var msg proto.ReadDataMsg
+				if _, err := msg.UnmarshalMsg(f.Payload); err != nil {
+					return 0, err
+				}
+				r.buf = msg.Data
+			case proto.MsgReadDone:
+				r.done = true
+				return 0, io.EOF
+			case proto.MsgErrorResp:
+				return 0, decodeError(f.Payload)
+			default:
+				return 0, fmt.Errorf("unexpected message type 0x%02x during read", f.MsgType)
+			}
+		case <-r.mux.Done():
 			r.done = true
 			return 0, io.EOF
-		case proto.MsgErrorResp:
-			return 0, decodeError(f.Payload)
-		default:
-			return 0, fmt.Errorf("unexpected message type 0x%02x during read", f.MsgType)
 		}
 	}
 
