@@ -98,25 +98,43 @@ Measured with [hyperfine](https://github.com/sharkdp/hyperfine) (3 runs, 1 warmu
 
 beam is **2.3x faster than rsync** on large files and **1.3x faster** on many small files for local transfers.
 
-### Network transfers (beam protocol vs rsync over SSH)
+### Network transfers — beam:// direct (beam protocol vs rsync over SSH)
 
-Measured with [hyperfine](https://github.com/sharkdp/hyperfine) (3 runs, 1 warmup) over localhost loopback (beam:// vs rsync-over-SSH).
+Measured with [hyperfine](https://github.com/sharkdp/hyperfine) (3 runs, 1 warmup) over a real network to a remote host running a beam daemon.
 
 **1 GB file:**
 
 | Command | Mean | Relative |
 |:--------|-----:|---------:|
-| **`beam` (beam://)** | **931 ms** | **1.00x** |
-| `rsync` (SSH) | 1.62 s | 1.74x slower |
+| **`beam` (beam://)** | **30.7 s** | **1.00x** |
+| `rsync` (SSH) | 32.7 s | 1.06x slower |
 
 **10,000 x 4 KB files:**
 
 | Command | Mean | Relative |
 |:--------|-----:|---------:|
-| **`beam -r` (beam://)** | **176 ms** | **1.00x** |
-| `rsync -r` (SSH) | 444 ms | 2.52x slower |
+| **`beam -r` (beam://)** | **1.46 s** | **1.00x** |
+| `rsync -a` (SSH) | 2.19 s | 1.50x slower |
 
-beam's custom protocol is **1.7x faster than rsync** for large file transfers thanks to TLS stream multiplexing and zero-overhead framing, and **2.5x faster** for many small files thanks to batch RPCs and a pre-built destination index that eliminates per-file round-trips. Speedups are larger over real networks where per-file round-trip latency dominates.
+### Network transfers — beam-over-SSH (auto-detected daemon vs rsync)
+
+When connecting via SSH, beam auto-detects a running daemon on the remote host and transparently upgrades to the beam protocol through an SSH tunnel.
+
+**1 GB file:**
+
+| Command | Mean | Relative |
+|:--------|-----:|---------:|
+| `rsync` (SSH) | **34.5 s** | **1.00x** |
+| `beam` (SSH+beam) | 42.2 s | 1.22x slower |
+
+**10,000 x 4 KB files:**
+
+| Command | Mean | Relative |
+|:--------|-----:|---------:|
+| **`beam -r` (SSH+beam)** | **1.86 s** | **1.00x** |
+| `rsync -a` (SSH) | 2.17 s | 1.16x slower |
+
+For large file transfers, beam:// direct is **on par with rsync** (network bandwidth is the bottleneck, not protocol overhead). For **many small files**, beam is **1.5x faster** thanks to batch RPCs that reduce per-file round-trips from 5 to 1/N. Beam-over-SSH adds tunnel overhead that makes large files slower, but still wins on small files where round-trip latency dominates.
 
 > Run your own benchmarks: `make benchmark` or `scripts/benchmark.sh --help`
 
