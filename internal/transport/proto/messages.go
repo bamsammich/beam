@@ -14,7 +14,7 @@ const (
 	MsgPingReq       byte = 0x03
 	MsgPongResp      byte = 0x04
 
-	// ReadEndpoint operations.
+	// Reader operations.
 	MsgWalkReq     byte = 0x10
 	MsgWalkEntry   byte = 0x11
 	MsgWalkEnd     byte = 0x12
@@ -28,7 +28,7 @@ const (
 	MsgHashReq     byte = 0x1A
 	MsgHashResp    byte = 0x1B
 
-	// WriteEndpoint operations.
+	// Writer operations.
 	MsgMkdirAllReq    byte = 0x20
 	MsgAckResp        byte = 0x21
 	MsgCreateTempReq  byte = 0x22

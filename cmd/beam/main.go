@@ -27,15 +27,15 @@ import (
 	"github.com/bamsammich/beam/internal/ui/tui"
 )
 
-// connectorFor creates a Connector for the given location.
+// transportFor creates a Transport for the given location.
 //
 //nolint:ireturn // factory returns interface by design
-func connectorFor(
+func transportFor(
 	loc transport.Location,
 	flagToken, sshKeyFile string,
 	sshPort int,
 	noBeamSSH bool,
-) (transport.Connector, error) {
+) (transport.Transport, error) {
 	if loc.IsBeam() {
 		token := flagToken
 		if token == "" {
@@ -46,10 +46,10 @@ func connectorFor(
 				"beam:// requires an authentication token (use --beam-token or beam://token@host/path)",
 			)
 		}
-		return beam.NewConnector(beamAddr(loc), token, proto.ClientTLSConfig(true)), nil
+		return beam.NewTransport(beamAddr(loc), token, proto.ClientTLSConfig(true)), nil
 	}
 	if loc.IsRemote() {
-		return beam.NewSSHConnector(beam.SSHConnectorOpts{
+		return beam.NewSSHTransport(beam.SSHTransportOpts{
 			Host: loc.Host,
 			User: loc.User,
 			SSHOpts: transport.SSHOpts{
@@ -59,7 +59,7 @@ func connectorFor(
 			NoBeam: noBeamSSH,
 		}), nil
 	}
-	return transport.NewLocalConnector(), nil
+	return transport.NewLocalTransport(), nil
 }
 
 func beamAddr(loc transport.Location) string {
@@ -180,13 +180,13 @@ func run() int {
 			dst := dstLoc.Path
 
 			// Create connectors for source and destination.
-			srcConn, err := connectorFor(srcLocs[0], beamToken, sshKeyFile, sshPort, noBeamSSH)
+			srcConn, err := transportFor(srcLocs[0], beamToken, sshKeyFile, sshPort, noBeamSSH)
 			if err != nil {
 				return fmt.Errorf("source %s: %w", srcLocs[0], err)
 			}
 			defer srcConn.Close()
 
-			dstConn, err := connectorFor(dstLoc, beamToken, sshKeyFile, sshPort, noBeamSSH)
+			dstConn, err := transportFor(dstLoc, beamToken, sshKeyFile, sshPort, noBeamSSH)
 			if err != nil {
 				return fmt.Errorf("destination %s: %w", dstLoc, err)
 			}
@@ -383,8 +383,8 @@ func run() int {
 				Verify:         verifyFlag,
 				NoTimes:        noTimes,
 				WorkerLimit:    workerLimit,
-				SrcConnector:   srcConn,
-				DstConnector:   dstConn,
+				SrcTransport:   srcConn,
+				DstTransport:   dstConn,
 				Delta:          useDelta,
 				BWLimit:        bwLimit,
 			}

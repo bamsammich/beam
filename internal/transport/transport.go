@@ -15,17 +15,16 @@ const (
 	ProtocolBeam
 )
 
-// Connector abstracts connection establishment for all transport types.
-// Every parsed location resolves to a Connector — the engine calls
-// ConnectRead/ConnectWrite when it needs endpoints.
+// Transport manages connection lifecycle and provides Reader/ReadWriter
+// views rooted at specific paths.
 //
 // Optional capabilities (BatchWriter, DeltaSource, DeltaTarget, SubtreeWalker,
 // PathResolver) are discovered via type assertion on the returned endpoint.
 // The endpoint's Caps() struct declares what it supports; the assertion
 // provides the typed method set.
-type Connector interface {
-	ConnectRead(path string) (ReadEndpoint, error)
-	ConnectWrite(path string) (WriteEndpoint, error)
+type Transport interface {
+	ReaderAt(path string) (Reader, error)
+	ReadWriterAt(path string) (ReadWriter, error)
 	Protocol() Protocol
 	Close() error
 }
@@ -127,17 +126,14 @@ type WriteFile interface {
 	Name() string
 }
 
-// ReadEndpoint is the source side of a transfer.
-type ReadEndpoint interface {
+// Reader provides read-only filesystem operations relative to a root.
+type Reader interface {
 	// Walk recursively walks the tree rooted at the endpoint, calling fn for
 	// each entry. relPath is relative to the endpoint root.
 	Walk(fn func(entry FileEntry) error) error
 
 	// Stat returns metadata for a single relative path.
 	Stat(relPath string) (FileEntry, error)
-
-	// ReadDir lists immediate children of a relative directory path.
-	ReadDir(relPath string) ([]FileEntry, error)
 
 	// OpenRead opens a file for reading by relative path.
 	OpenRead(relPath string) (io.ReadCloser, error)
@@ -155,8 +151,8 @@ type ReadEndpoint interface {
 	Close() error
 }
 
-// WriteEndpoint is the destination side of a transfer.
-type WriteEndpoint interface {
+// Writer provides write-only filesystem operations relative to a root.
+type Writer interface {
 	// MkdirAll creates a directory and all parents.
 	MkdirAll(relPath string, perm os.FileMode) error
 
@@ -181,26 +177,12 @@ type WriteEndpoint interface {
 
 	// SetMetadata sets file metadata according to opts.
 	SetMetadata(relPath string, entry FileEntry, opts MetadataOpts) error
+}
 
-	// Walk recursively walks the tree rooted at the endpoint.
-	Walk(fn func(entry FileEntry) error) error
-
-	// Stat returns metadata for a single relative path.
-	Stat(relPath string) (FileEntry, error)
-
-	// OpenRead opens an existing file for reading (used by delta transfer
-	// to read the basis file on the destination).
-	OpenRead(relPath string) (io.ReadCloser, error)
-
-	// Hash computes the BLAKE3 hash of a file by relative path.
-	Hash(relPath string) (string, error)
-
-	// Root returns the absolute root path of this endpoint.
-	Root() string
-
-	// Caps returns the capabilities of this endpoint.
-	Caps() Capabilities
-
-	// Close releases resources held by this endpoint.
-	Close() error
+// ReadWriter provides full read+write filesystem operations.
+// Destinations need both: reads for delta basis, dst walking, skip detection;
+// writes for the actual copy.
+type ReadWriter interface {
+	Reader
+	Writer
 }

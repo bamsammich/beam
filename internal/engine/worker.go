@@ -26,8 +26,8 @@ type WorkerConfig struct {
 	Events        chan<- event.Event
 	WorkerLimit   *atomic.Int32 // runtime throttle; nil = all workers active
 	BWLimiter     *rate.Limiter // shared bandwidth limiter; nil = unlimited
-	SrcEndpoint   transport.ReadEndpoint
-	DstEndpoint   transport.WriteEndpoint
+	SrcEndpoint   transport.Reader
+	DstEndpoint   transport.ReadWriter
 	DstRoot       string // destination root for computing relative paths
 	NumWorkers    int
 	PreserveMode  bool
@@ -69,7 +69,7 @@ func NewWorkerPool(cfg WorkerConfig) (*WorkerPool, error) {
 }
 
 // isLocalEndpoints returns true when both endpoints support local path resolution.
-func isLocalEndpoints(src transport.ReadEndpoint, dst transport.WriteEndpoint) bool {
+func isLocalEndpoints(src transport.Reader, dst transport.ReadWriter) bool {
 	_, srcLocal := src.(transport.PathResolver)
 	_, dstLocal := dst.(transport.PathResolver)
 	return srcLocal && dstLocal

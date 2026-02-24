@@ -23,8 +23,8 @@ func testServer(t *testing.T, root string) (clientMux *proto.Mux, cleanup func()
 
 	clientConn, serverConn := net.Pipe()
 
-	readEP := transport.NewLocalReadEndpoint(root)
-	writeEP := transport.NewLocalWriteEndpoint(root)
+	readEP := transport.NewLocalReader(root)
+	writeEP := transport.NewLocalWriter(root)
 
 	serverMux := proto.NewMux(serverConn)
 	clientMux = proto.NewMux(clientConn)

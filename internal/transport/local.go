@@ -15,23 +15,23 @@ import (
 
 // Compile-time interface checks.
 var (
-	_ ReadEndpoint  = (*LocalReadEndpoint)(nil)
-	_ WriteEndpoint = (*LocalWriteEndpoint)(nil)
-	_ PathResolver  = (*LocalReadEndpoint)(nil)
-	_ PathResolver  = (*LocalWriteEndpoint)(nil)
+	_ Reader       = (*LocalReader)(nil)
+	_ ReadWriter   = (*LocalWriter)(nil)
+	_ PathResolver = (*LocalReader)(nil)
+	_ PathResolver = (*LocalWriter)(nil)
 )
 
-// LocalReadEndpoint reads from the local filesystem.
-type LocalReadEndpoint struct {
+// LocalReader reads from the local filesystem.
+type LocalReader struct {
 	root string
 }
 
-// NewLocalReadEndpoint creates a new local read endpoint rooted at root.
-func NewLocalReadEndpoint(root string) *LocalReadEndpoint {
-	return &LocalReadEndpoint{root: root}
+// NewLocalReader creates a new local read endpoint rooted at root.
+func NewLocalReader(root string) *LocalReader {
+	return &LocalReader{root: root}
 }
 
-func (e *LocalReadEndpoint) Walk(fn func(entry FileEntry) error) error {
+func (e *LocalReader) Walk(fn func(entry FileEntry) error) error {
 	return filepath.WalkDir(e.root, func(path string, _ os.DirEntry, err error) error {
 		if err != nil {
 			return nil // skip inaccessible entries
@@ -48,12 +48,12 @@ func (e *LocalReadEndpoint) Walk(fn func(entry FileEntry) error) error {
 	})
 }
 
-func (e *LocalReadEndpoint) Stat(relPath string) (FileEntry, error) {
+func (e *LocalReader) Stat(relPath string) (FileEntry, error) {
 	absPath := filepath.Join(e.root, relPath)
 	return e.statAbsolute(absPath, relPath)
 }
 
-func (e *LocalReadEndpoint) ReadDir(relPath string) ([]FileEntry, error) {
+func (e *LocalReader) ReadDir(relPath string) ([]FileEntry, error) {
 	absPath := filepath.Join(e.root, relPath)
 	entries, err := os.ReadDir(absPath)
 	if err != nil {
@@ -73,20 +73,20 @@ func (e *LocalReadEndpoint) ReadDir(relPath string) ([]FileEntry, error) {
 	return result, nil
 }
 
-func (e *LocalReadEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
+func (e *LocalReader) OpenRead(relPath string) (io.ReadCloser, error) {
 	absPath := filepath.Join(e.root, relPath)
 	return os.Open(absPath)
 }
 
-func (e *LocalReadEndpoint) Hash(relPath string) (string, error) {
+func (e *LocalReader) Hash(relPath string) (string, error) {
 	absPath := filepath.Join(e.root, relPath)
 	return hashLocalFile(absPath)
 }
 
-func (e *LocalReadEndpoint) Root() string { return e.root }
-func (*LocalReadEndpoint) Close() error   { return nil }
+func (e *LocalReader) Root() string { return e.root }
+func (*LocalReader) Close() error   { return nil }
 
-func (*LocalReadEndpoint) Caps() Capabilities {
+func (*LocalReader) Caps() Capabilities {
 	return Capabilities{
 		SparseDetect:  true,
 		Hardlinks:     true,
@@ -102,11 +102,11 @@ func (*LocalReadEndpoint) Caps() Capabilities {
 // AbsPath returns the absolute path for a relative path. This is the
 // escape hatch for local-only operations that need raw filesystem access
 // (e.g. platform.CopyFile, DetectSparseSegments).
-func (e *LocalReadEndpoint) AbsPath(relPath string) string {
+func (e *LocalReader) AbsPath(relPath string) string {
 	return filepath.Join(e.root, relPath)
 }
 
-func (*LocalReadEndpoint) statAbsolute(absPath, relPath string) (FileEntry, error) {
+func (*LocalReader) statAbsolute(absPath, relPath string) (FileEntry, error) {
 	info, err := os.Lstat(absPath)
 	if err != nil {
 		return FileEntry{}, err
@@ -114,23 +114,23 @@ func (*LocalReadEndpoint) statAbsolute(absPath, relPath string) (FileEntry, erro
 	return fileInfoToEntry(info, relPath, absPath)
 }
 
-// LocalWriteEndpoint writes to the local filesystem.
-type LocalWriteEndpoint struct {
+// LocalWriter writes to the local filesystem.
+type LocalWriter struct {
 	root string
 }
 
-// NewLocalWriteEndpoint creates a new local write endpoint rooted at root.
-func NewLocalWriteEndpoint(root string) *LocalWriteEndpoint {
-	return &LocalWriteEndpoint{root: root}
+// NewLocalWriter creates a new local write endpoint rooted at root.
+func NewLocalWriter(root string) *LocalWriter {
+	return &LocalWriter{root: root}
 }
 
-func (e *LocalWriteEndpoint) MkdirAll(relPath string, perm os.FileMode) error {
+func (e *LocalWriter) MkdirAll(relPath string, perm os.FileMode) error {
 	absPath := filepath.Join(e.root, relPath)
 	return os.MkdirAll(absPath, perm)
 }
 
-//nolint:ireturn // implements WriteEndpoint interface
-func (e *LocalWriteEndpoint) CreateTemp(relPath string, perm os.FileMode) (WriteFile, error) {
+//nolint:ireturn // implements ReadWriter interface
+func (e *LocalWriter) CreateTemp(relPath string, perm os.FileMode) (WriteFile, error) {
 	absPath := filepath.Join(e.root, relPath)
 	dir := filepath.Dir(absPath)
 	base := filepath.Base(absPath)
@@ -144,36 +144,36 @@ func (e *LocalWriteEndpoint) CreateTemp(relPath string, perm os.FileMode) (Write
 	return &localWriteFile{File: f, relPath: relPathFromRoot(e.root, tmpPath)}, nil
 }
 
-func (e *LocalWriteEndpoint) Rename(oldRel, newRel string) error {
+func (e *LocalWriter) Rename(oldRel, newRel string) error {
 	oldAbs := filepath.Join(e.root, oldRel)
 	newAbs := filepath.Join(e.root, newRel)
 	return os.Rename(oldAbs, newAbs)
 }
 
-func (e *LocalWriteEndpoint) Remove(relPath string) error {
+func (e *LocalWriter) Remove(relPath string) error {
 	absPath := filepath.Join(e.root, relPath)
 	return os.Remove(absPath)
 }
 
-func (e *LocalWriteEndpoint) RemoveAll(relPath string) error {
+func (e *LocalWriter) RemoveAll(relPath string) error {
 	absPath := filepath.Join(e.root, relPath)
 	return os.RemoveAll(absPath)
 }
 
-func (e *LocalWriteEndpoint) Symlink(target, newRel string) error {
+func (e *LocalWriter) Symlink(target, newRel string) error {
 	absNew := filepath.Join(e.root, newRel)
 	_ = os.Remove(absNew)
 	return os.Symlink(target, absNew)
 }
 
-func (e *LocalWriteEndpoint) Link(oldRel, newRel string) error {
+func (e *LocalWriter) Link(oldRel, newRel string) error {
 	oldAbs := filepath.Join(e.root, oldRel)
 	newAbs := filepath.Join(e.root, newRel)
 	_ = os.Remove(newAbs)
 	return os.Link(oldAbs, newAbs)
 }
 
-func (e *LocalWriteEndpoint) SetMetadata(relPath string, entry FileEntry, opts MetadataOpts) error {
+func (e *LocalWriter) SetMetadata(relPath string, entry FileEntry, opts MetadataOpts) error {
 	absPath := filepath.Join(e.root, relPath)
 
 	if opts.Mode {
@@ -205,7 +205,7 @@ func (e *LocalWriteEndpoint) SetMetadata(relPath string, entry FileEntry, opts M
 }
 
 //nolint:revive // cognitive-complexity: directory walk with multiple error checks
-func (e *LocalWriteEndpoint) Walk(fn func(entry FileEntry) error) error {
+func (e *LocalWriter) Walk(fn func(entry FileEntry) error) error {
 	return filepath.WalkDir(e.root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -226,7 +226,7 @@ func (e *LocalWriteEndpoint) Walk(fn func(entry FileEntry) error) error {
 	})
 }
 
-func (e *LocalWriteEndpoint) Stat(relPath string) (FileEntry, error) {
+func (e *LocalWriter) Stat(relPath string) (FileEntry, error) {
 	absPath := filepath.Join(e.root, relPath)
 	info, err := os.Lstat(absPath)
 	if err != nil {
@@ -235,20 +235,20 @@ func (e *LocalWriteEndpoint) Stat(relPath string) (FileEntry, error) {
 	return fileInfoToEntry(info, relPath, absPath)
 }
 
-func (e *LocalWriteEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
+func (e *LocalWriter) OpenRead(relPath string) (io.ReadCloser, error) {
 	absPath := filepath.Join(e.root, relPath)
 	return os.Open(absPath)
 }
 
-func (e *LocalWriteEndpoint) Hash(relPath string) (string, error) {
+func (e *LocalWriter) Hash(relPath string) (string, error) {
 	absPath := filepath.Join(e.root, relPath)
 	return hashLocalFile(absPath)
 }
 
-func (e *LocalWriteEndpoint) Root() string { return e.root }
+func (e *LocalWriter) Root() string { return e.root }
 
-func (*LocalWriteEndpoint) Close() error { return nil }
-func (*LocalWriteEndpoint) Caps() Capabilities {
+func (*LocalWriter) Close() error { return nil }
+func (*LocalWriter) Caps() Capabilities {
 	return Capabilities{
 		SparseDetect:  true,
 		Hardlinks:     true,
@@ -263,12 +263,12 @@ func (*LocalWriteEndpoint) Caps() Capabilities {
 
 // AbsPath returns the absolute path for a relative path. This is the
 // escape hatch for local-only operations that need raw fd access.
-func (e *LocalWriteEndpoint) AbsPath(relPath string) string {
+func (e *LocalWriter) AbsPath(relPath string) string {
 	return filepath.Join(e.root, relPath)
 }
 
 // LocalFile extracts the underlying *os.File from a WriteFile created by
-// this endpoint. Returns nil if wf is not from a LocalWriteEndpoint.
+// this endpoint. Returns nil if wf is not from a LocalWriter.
 func LocalFile(wf WriteFile) *os.File {
 	if lf, ok := wf.(*localWriteFile); ok {
 		return lf.File

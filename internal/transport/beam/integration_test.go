@@ -20,7 +20,7 @@ import (
 )
 
 // TestBeamToBeamTransfer exercises a full directory copy through the beam
-// protocol: source daemon → ReadEndpoint → WriteEndpoint → dest daemon.
+// protocol: source daemon → Reader → Writer → dest daemon.
 // This mimics what the engine does for a beam-to-beam transfer.
 func TestBeamToBeamTransfer(t *testing.T) {
 	t.Parallel()
@@ -65,8 +65,8 @@ func TestBeamToBeamTransfer(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
-	srcEP := beam.NewReadEndpoint(srcMux, srcDir, srcDir, srcCaps)
-	dstEP := beam.NewWriteEndpoint(dstMux, dstDir, dstDir, dstCaps)
+	srcEP := beam.NewReader(srcMux, srcDir, srcDir, srcCaps)
+	dstEP := beam.NewWriter(dstMux, dstDir, dstDir, dstCaps)
 
 	// --- Walk source, replicate to dest ---
 	var entries []transport.FileEntry
@@ -156,7 +156,7 @@ func TestBeamToBeamDeleteSync(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
-	dstEP := beam.NewWriteEndpoint(dstMux, dstDir, dstDir, dstCaps)
+	dstEP := beam.NewWriter(dstMux, dstDir, dstDir, dstCaps)
 
 	// Walk destination to find extraneous files.
 	srcFiles := map[string]bool{"keep.txt": true}
@@ -206,8 +206,8 @@ func TestBeamToBeamMetadata(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
-	srcEP := beam.NewReadEndpoint(srcMux, srcDir, srcDir, srcCaps)
-	dstEP := beam.NewWriteEndpoint(dstMux, dstDir, dstDir, dstCaps)
+	srcEP := beam.NewReader(srcMux, srcDir, srcDir, srcCaps)
+	dstEP := beam.NewWriter(dstMux, dstDir, dstDir, dstCaps)
 
 	// Copy the file.
 	entry, err := srcEP.Stat("meta.txt")
@@ -239,7 +239,7 @@ func TestBeamToBeamMetadata(t *testing.T) {
 }
 
 // TestBeamEndToEndEngineIntegration uses the actual engine to perform a copy
-// with a WriteEndpoint as destination. This is the closest we can get to
+// with a beam Writer as destination. This is the closest we can get to
 // what `beam -a /src beam://token@host/dst` does.
 func TestBeamEndToEndEngineIntegration(t *testing.T) {
 	t.Parallel()
@@ -260,9 +260,9 @@ func TestBeamEndToEndEngineIntegration(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
-	dstConn := beam.NewConnectorFromMux(dstMux, dstDir, dstCaps)
+	dstConn := beam.NewTransportFromMux(dstMux, dstDir, dstCaps)
 
-	// Use the engine to copy srcDir/dir/ → dstDir/ via beam connector.
+	// Use the engine to copy srcDir/dir/ → dstDir/ via beam transport.
 	ctx := context.Background()
 	events := make(chan event.Event, 256)
 
@@ -280,8 +280,8 @@ func TestBeamEndToEndEngineIntegration(t *testing.T) {
 		Archive:      true,
 		Workers:      2,
 		Events:       events,
-		SrcConnector: transport.NewLocalConnector(),
-		DstConnector: dstConn,
+		SrcTransport: transport.NewLocalTransport(),
+		DstTransport: dstConn,
 	})
 	close(events)
 

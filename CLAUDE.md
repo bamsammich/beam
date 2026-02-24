@@ -52,16 +52,16 @@ internal/
     copy_fallback.go       — read/write with large aligned buffers
 
   transport/
-    transport.go           — Connector, ReadEndpoint / WriteEndpoint interfaces, capability interfaces, FileEntry, Capabilities
-    connector.go           — LocalConnector (local filesystem connector)
+    transport.go           — Transport, Reader / Writer / ReadWriter interfaces, capability interfaces, FileEntry, Capabilities
+    connector.go           — LocalTransport (local filesystem transport)
     local.go               — local filesystem endpoints
     sftp.go                — SSH/SFTP endpoints (with borrowed-connection support)
     ssh.go                 — SSH connection management
     delta.go               — rsync-style block matching delta transfer
     location.go            — user@host:path location parsing
     beam/
-      connector.go         — BeamConnector (direct beam://), SSHConnector (SSH with beam auto-detect + SFTP fallback)
-      endpoint.go          — beam protocol ReadEndpoint + WriteEndpoint (incl. WriteFileBatch)
+      connector.go         — beam.Transport (direct beam://), beam.SSHTransport (SSH with beam auto-detect + SFTP fallback)
+      endpoint.go          — beam protocol Reader + Writer (incl. WriteFileBatch)
       discover.go          — SSH beam daemon auto-detection, tunnel, convenience wrappers
     proto/
       daemon.go            — standalone TCP daemon (beam daemon)
@@ -103,13 +103,13 @@ internal/
 [Verify goroutine pool]
 ```
 
-### Connector Layer
+### Transport Layer
 
-Every parsed location resolves to a `transport.Connector` — the engine accepts connectors (not pre-made endpoints) and calls `ConnectRead`/`ConnectWrite` when it needs endpoints:
+Every parsed location resolves to a `transport.Transport` — the engine accepts transports (not pre-made endpoints) and calls `ReaderAt`/`ReadWriterAt` when it needs endpoints:
 
-- `LocalConnector` — creates fresh local endpoints per call
-- `BeamConnector` — manages a direct `beam://` connection; caches endpoints (shared mux)
-- `SSHConnector` — dials SSH, auto-detects beam daemon, delegates to `BeamConnector` or SFTP fallback
+- `LocalTransport` — creates fresh local endpoints per call
+- `beam.Transport` — manages a direct `beam://` connection; caches endpoints (shared mux)
+- `beam.SSHTransport` — dials SSH, auto-detects beam daemon, delegates to `beam.Transport` or SFTP fallback
 
 ### Capability Interfaces
 
@@ -121,7 +121,7 @@ Optional transport features are discovered via type assertion on endpoints (idio
 - `SubtreeWalker` — subtree walking relative to endpoint root (`WalkSubtree`)
 - `PathResolver` — resolve relative paths to absolute filesystem paths (`AbsPath`)
 
-The engine never type-asserts concrete endpoint types — only these capability interfaces.
+The engine never type-asserts concrete transport types — only these capability interfaces.
 
 ### Protocol Backward Compatibility (STRICT)
 
@@ -184,13 +184,13 @@ All initial phases are implemented:
 - **Batch RPC** — WriteFileBatchReq/Resp for small-file batching, TCP/mux optimizations
 - **Path fix + DstIndex** — Beam endpoint path translation, subtree Walk, pre-built destination index for skip detection
 - **Phase 6d** — SSH beam daemon auto-detection: reads `/etc/beam/daemon.toml` over SFTP, tunnels TLS connection to daemon through SSH, upgrades to beam protocol transparently; `--no-beam-ssh` flag to force SFTP
-- **Connector Factory** — Connector interface + capability interfaces (BatchWriter, DeltaSource, DeltaTarget, SubtreeWalker, PathResolver); BeamConnector, SSHConnector with auto-detect composition; engine decoupled from concrete endpoint types
+- **Transport Factory** — Transport interface + capability interfaces (BatchWriter, DeltaSource, DeltaTarget, SubtreeWalker, PathResolver); beam.Transport, beam.SSHTransport with auto-detect composition; engine decoupled from concrete types
 
 ### Known Issues
 
 - **`--bwlimit` has no effect on local copies.** The kernel fast paths (`copy_file_range`, `sendfile`) bypass userspace entirely, so the `rate.Limiter` wrapping `io.Reader`/`io.Writer` is never hit. Fix: when `--bwlimit` is set, skip the kernel fast path and fall back to the userspace read/write loop where the limiter lives.
 - **VHS demo GIFs need re-recording.** The current inline and TUI demo GIFs complete too fast to show the HUD. Re-record after bwlimit is fixed for local copies, or use a real network transfer between two machines.
-- **`DialBeam`/`DialBeamConn`/`DialBeamTunnel` return 4 values.** This triggers `function-result-limit` lint errors (currently suppressed with `//nolint:revive`). Fix: introduce a `BeamConn` result struct (`Mux *proto.Mux`, `Root string`, `Caps transport.Capabilities`) so all three functions return `(BeamConn, error)`. Update all call sites in `endpoint.go`, `discover.go`, `endpoint_test.go`, `integration_test.go`, and `cmd/beam/main.go`.
+- **`DialBeam`/`DialBeamConn`/`DialBeamTunnel` return 4 values.** This triggers `function-result-limit` lint errors (currently suppressed with `//nolint:revive`). Fix: introduce a `BeamConn` result struct (`Mux *proto.Mux`, `Root string`, `Caps transport.Capabilities`) so all three functions return `(BeamConn, error)`. Update all call sites in `beam/endpoint.go`, `beam/discover.go`, `beam/*_test.go`, and `cmd/beam/main.go`.
 
 ---
 

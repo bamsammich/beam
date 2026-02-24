@@ -86,15 +86,15 @@ Measured with [hyperfine](https://github.com/sharkdp/hyperfine) (3 runs, 1 warmu
 
 | Command | Mean | Relative |
 |:--------|-----:|---------:|
-| **`beam`** | **385 ms** | **1.00x** |
-| `rsync` | 889 ms | 2.31x slower |
+| **`beam`** | **391 ms** | **1.00x** |
+| `rsync` | 907 ms | 2.32x slower |
 
 **10,000 x 4 KB files:**
 
 | Command | Mean | Relative |
 |:--------|-----:|---------:|
-| **`beam -r`** | **194 ms** | **1.00x** |
-| `rsync -a` | 252 ms | 1.30x slower |
+| **`beam -r`** | **199 ms** | **1.00x** |
+| `rsync -a` | 264 ms | 1.33x slower |
 
 beam is **2.3x faster than rsync** on large files and **1.3x faster** on many small files for local transfers.
 
@@ -106,17 +106,17 @@ Measured with [hyperfine](https://github.com/sharkdp/hyperfine) (3 runs, 1 warmu
 
 | Command | Mean | Relative |
 |:--------|-----:|---------:|
-| **`beam` (beam://)** | **908 ms** | **1.00x** |
-| `rsync` (SSH) | 1.58 s | 1.74x slower |
+| **`beam` (beam://)** | **931 ms** | **1.00x** |
+| `rsync` (SSH) | 1.62 s | 1.74x slower |
 
 **10,000 x 4 KB files:**
 
 | Command | Mean | Relative |
 |:--------|-----:|---------:|
-| **`beam -r` (beam://)** | **170 ms** | **1.00x** |
-| `rsync -r` (SSH) | 435 ms | 2.56x slower |
+| **`beam -r` (beam://)** | **176 ms** | **1.00x** |
+| `rsync -r` (SSH) | 444 ms | 2.52x slower |
 
-beam's custom protocol is **1.7x faster than rsync** for large file transfers thanks to TLS stream multiplexing and zero-overhead framing, and **2.6x faster** for many small files thanks to batch RPCs and a pre-built destination index that eliminates per-file round-trips. Speedups are larger over real networks where per-file round-trip latency dominates.
+beam's custom protocol is **1.7x faster than rsync** for large file transfers thanks to TLS stream multiplexing and zero-overhead framing, and **2.5x faster** for many small files thanks to batch RPCs and a pre-built destination index that eliminates per-file round-trips. Speedups are larger over real networks where per-file round-trip latency dominates.
 
 > Run your own benchmarks: `make benchmark` or `scripts/benchmark.sh --help`
 

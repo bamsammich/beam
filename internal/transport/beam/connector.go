@@ -13,19 +13,19 @@ import (
 
 // Compile-time interface checks.
 var (
-	_ transport.Connector = (*Connector)(nil)
-	_ transport.Connector = (*SSHConnector)(nil)
+	_ transport.Transport = (*Transport)(nil)
+	_ transport.Transport = (*SSHTransport)(nil)
 )
 
-// Connector manages a direct beam:// protocol connection.
-// Endpoints are cached: the first ConnectRead/ConnectWrite creates and stores
+// Transport manages a direct beam:// protocol connection.
+// Endpoints are cached: the first ReaderAt/ReadWriterAt creates and stores
 // the endpoint; subsequent calls return the cached one. This is necessary
 // because beam endpoints share a mux with sequentially-allocated stream IDs.
-type Connector struct {
+type Transport struct {
 	tlsConfig *tls.Config
 	mux       *proto.Mux
-	readEP    *ReadEndpoint
-	writeEP   *WriteEndpoint
+	readEP    *Reader
+	writeEP   *Writer
 	addr      string
 	token     string
 	root      string
@@ -33,20 +33,20 @@ type Connector struct {
 	connected bool
 }
 
-// NewConnector creates a connector for a direct beam:// URL.
-// Connection is lazy — the first ConnectRead or ConnectWrite triggers DialBeam.
-func NewConnector(addr, token string, tlsConfig *tls.Config) *Connector {
-	return &Connector{
+// NewTransport creates a transport for a direct beam:// URL.
+// Connection is lazy — the first ReaderAt or ReadWriterAt triggers DialBeam.
+func NewTransport(addr, token string, tlsConfig *tls.Config) *Transport {
+	return &Transport{
 		addr:      addr,
 		token:     token,
 		tlsConfig: tlsConfig,
 	}
 }
 
-// NewConnectorFromMux creates a connector from an already-established mux
+// NewTransportFromMux creates a transport from an already-established mux
 // (e.g. from an SSH tunnel). The connection is already active.
-func NewConnectorFromMux(mux *proto.Mux, root string, caps transport.Capabilities) *Connector {
-	return &Connector{
+func NewTransportFromMux(mux *proto.Mux, root string, caps transport.Capabilities) *Transport {
+	return &Transport{
 		mux:       mux,
 		root:      root,
 		caps:      caps,
@@ -54,7 +54,7 @@ func NewConnectorFromMux(mux *proto.Mux, root string, caps transport.Capabilitie
 	}
 }
 
-func (c *Connector) connect() error {
+func (c *Transport) connect() error {
 	if c.connected {
 		return nil
 	}
@@ -69,33 +69,33 @@ func (c *Connector) connect() error {
 	return nil
 }
 
-//nolint:ireturn // implements Connector interface
-func (c *Connector) ConnectRead(path string) (transport.ReadEndpoint, error) {
+//nolint:ireturn // implements Transport interface
+func (c *Transport) ReaderAt(path string) (transport.Reader, error) {
 	if c.readEP != nil {
 		return c.readEP, nil
 	}
 	if err := c.connect(); err != nil {
 		return nil, err
 	}
-	c.readEP = NewReadEndpoint(c.mux, path, c.root, c.caps)
+	c.readEP = NewReader(c.mux, path, c.root, c.caps)
 	return c.readEP, nil
 }
 
-//nolint:ireturn // implements Connector interface
-func (c *Connector) ConnectWrite(path string) (transport.WriteEndpoint, error) {
+//nolint:ireturn // implements Transport interface
+func (c *Transport) ReadWriterAt(path string) (transport.ReadWriter, error) {
 	if c.writeEP != nil {
 		return c.writeEP, nil
 	}
 	if err := c.connect(); err != nil {
 		return nil, err
 	}
-	c.writeEP = NewWriteEndpoint(c.mux, path, c.root, c.caps)
+	c.writeEP = NewWriter(c.mux, path, c.root, c.caps)
 	return c.writeEP, nil
 }
 
-func (*Connector) Protocol() transport.Protocol { return transport.ProtocolBeam }
+func (*Transport) Protocol() transport.Protocol { return transport.ProtocolBeam }
 
-func (c *Connector) Close() error {
+func (c *Transport) Close() error {
 	if c.readEP != nil {
 		c.readEP.Close()
 	}
@@ -108,30 +108,30 @@ func (c *Connector) Close() error {
 	return nil
 }
 
-// SSHConnectorOpts configures an SSH connector.
-type SSHConnectorOpts struct {
+// SSHTransportOpts configures an SSH transport.
+type SSHTransportOpts struct {
 	Host    string
 	User    string
 	SSHOpts transport.SSHOpts
 	NoBeam  bool
 }
 
-// SSHConnector handles SSH with beam auto-detection.
+// SSHTransport handles SSH with beam auto-detection.
 // It dials SSH, checks for a beam daemon, and delegates to either a
-// Connector (via tunnel) or an sftpConnector.
-type SSHConnector struct {
-	inner     transport.Connector
+// Transport (via tunnel) or an sftpTransport.
+type SSHTransport struct {
+	inner     transport.Transport
 	sshClient *ssh.Client
-	opts      SSHConnectorOpts
+	opts      SSHTransportOpts
 }
 
-// NewSSHConnector creates an SSH connector. Connection is lazy.
-func NewSSHConnector(opts SSHConnectorOpts) *SSHConnector {
-	return &SSHConnector{opts: opts}
+// NewSSHTransport creates an SSH transport. Connection is lazy.
+func NewSSHTransport(opts SSHTransportOpts) *SSHTransport {
+	return &SSHTransport{opts: opts}
 }
 
 //nolint:revive // cognitive-complexity: SSH dial + beam detection + fallback
-func (c *SSHConnector) ensureConnected() error {
+func (c *SSHTransport) ensureConnected() error {
 	if c.inner != nil {
 		return nil
 	}
@@ -148,7 +148,7 @@ func (c *SSHConnector) ensureConnected() error {
 			mux, root, caps, tunnelErr := DialBeamTunnel(sshClient, discovery)
 			if tunnelErr == nil {
 				slog.Info("using beam protocol (daemon detected on remote)")
-				c.inner = NewConnectorFromMux(mux, root, caps)
+				c.inner = NewTransportFromMux(mux, root, caps)
 				return nil
 			}
 			slog.Debug("beam tunnel failed, using SFTP", "error", tunnelErr)
@@ -157,34 +157,34 @@ func (c *SSHConnector) ensureConnected() error {
 		}
 	}
 
-	c.inner = &sftpConnector{sshClient: sshClient}
+	c.inner = &sftpTransport{sshClient: sshClient}
 	return nil
 }
 
-//nolint:ireturn // implements Connector interface
-func (c *SSHConnector) ConnectRead(path string) (transport.ReadEndpoint, error) {
+//nolint:ireturn // implements Transport interface
+func (c *SSHTransport) ReaderAt(path string) (transport.Reader, error) {
 	if err := c.ensureConnected(); err != nil {
 		return nil, err
 	}
-	return c.inner.ConnectRead(path)
+	return c.inner.ReaderAt(path)
 }
 
-//nolint:ireturn // implements Connector interface
-func (c *SSHConnector) ConnectWrite(path string) (transport.WriteEndpoint, error) {
+//nolint:ireturn // implements Transport interface
+func (c *SSHTransport) ReadWriterAt(path string) (transport.ReadWriter, error) {
 	if err := c.ensureConnected(); err != nil {
 		return nil, err
 	}
-	return c.inner.ConnectWrite(path)
+	return c.inner.ReadWriterAt(path)
 }
 
-func (c *SSHConnector) Protocol() transport.Protocol {
+func (c *SSHTransport) Protocol() transport.Protocol {
 	if c.inner != nil {
 		return c.inner.Protocol()
 	}
 	return transport.ProtocolSFTP
 }
 
-func (c *SSHConnector) Close() error {
+func (c *SSHTransport) Close() error {
 	var err error
 	if c.inner != nil {
 		err = c.inner.Close()
@@ -197,20 +197,20 @@ func (c *SSHConnector) Close() error {
 	return err
 }
 
-// sftpConnector creates SFTP endpoints using a borrowed SSH connection.
-type sftpConnector struct {
+// sftpTransport creates SFTP endpoints using a borrowed SSH connection.
+type sftpTransport struct {
 	sshClient *ssh.Client
 }
 
-//nolint:ireturn // implements Connector interface
-func (c *sftpConnector) ConnectRead(path string) (transport.ReadEndpoint, error) {
-	return transport.NewSFTPReadEndpointBorrowed(c.sshClient, path)
+//nolint:ireturn // implements Transport interface
+func (c *sftpTransport) ReaderAt(path string) (transport.Reader, error) {
+	return transport.NewSFTPReaderBorrowed(c.sshClient, path)
 }
 
-//nolint:ireturn // implements Connector interface
-func (c *sftpConnector) ConnectWrite(path string) (transport.WriteEndpoint, error) {
-	return transport.NewSFTPWriteEndpointBorrowed(c.sshClient, path)
+//nolint:ireturn // implements Transport interface
+func (c *sftpTransport) ReadWriterAt(path string) (transport.ReadWriter, error) {
+	return transport.NewSFTPWriterBorrowed(c.sshClient, path)
 }
 
-func (*sftpConnector) Protocol() transport.Protocol { return transport.ProtocolSFTP }
-func (*sftpConnector) Close() error                 { return nil }
+func (*sftpTransport) Protocol() transport.Protocol { return transport.ProtocolSFTP }
+func (*sftpTransport) Close() error                 { return nil }

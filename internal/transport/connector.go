@@ -1,28 +1,28 @@
 package transport
 
 // Compile-time interface check.
-var _ Connector = (*LocalConnector)(nil)
+var _ Transport = (*LocalTransport)(nil)
 
-// LocalConnector creates local filesystem endpoints.
-// Each ConnectRead/ConnectWrite call returns a fresh endpoint rooted at the
+// LocalTransport creates local filesystem endpoints.
+// Each ReaderAt/ReadWriterAt call returns a fresh endpoint rooted at the
 // given path — this is critical for multi-source transfers where the engine
-// calls ConnectRead with different source paths.
-type LocalConnector struct{}
+// calls ReaderAt with different source paths.
+type LocalTransport struct{}
 
-// NewLocalConnector returns a new LocalConnector.
-func NewLocalConnector() *LocalConnector {
-	return &LocalConnector{}
+// NewLocalTransport returns a new LocalTransport.
+func NewLocalTransport() *LocalTransport {
+	return &LocalTransport{}
 }
 
-//nolint:ireturn // implements Connector interface
-func (*LocalConnector) ConnectRead(path string) (ReadEndpoint, error) {
-	return NewLocalReadEndpoint(path), nil
+//nolint:ireturn // implements Transport interface
+func (*LocalTransport) ReaderAt(path string) (Reader, error) {
+	return NewLocalReader(path), nil
 }
 
-//nolint:ireturn // implements Connector interface
-func (*LocalConnector) ConnectWrite(path string) (WriteEndpoint, error) {
-	return NewLocalWriteEndpoint(path), nil
+//nolint:ireturn // implements Transport interface
+func (*LocalTransport) ReadWriterAt(path string) (ReadWriter, error) {
+	return NewLocalWriter(path), nil
 }
 
-func (*LocalConnector) Protocol() Protocol { return ProtocolLocal }
-func (*LocalConnector) Close() error       { return nil }
+func (*LocalTransport) Protocol() Protocol { return ProtocolLocal }
+func (*LocalTransport) Close() error       { return nil }

@@ -16,40 +16,40 @@ import (
 
 // Compile-time interface checks.
 var (
-	_ ReadEndpoint  = (*SFTPReadEndpoint)(nil)
-	_ WriteEndpoint = (*SFTPWriteEndpoint)(nil)
+	_ Reader     = (*SFTPReader)(nil)
+	_ ReadWriter = (*SFTPWriter)(nil)
 )
 
-// SFTPReadEndpoint reads from a remote filesystem over SFTP.
-type SFTPReadEndpoint struct {
+// SFTPReader reads from a remote filesystem over SFTP.
+type SFTPReader struct {
 	client *sftp.Client
 	ssh    *ssh.Client
 	root   string
 }
 
-// NewSFTPReadEndpoint creates a read endpoint backed by an SFTP connection.
+// NewSFTPReader creates a read endpoint backed by an SFTP connection.
 // The endpoint owns both the SFTP and SSH clients — Close() closes both.
-func NewSFTPReadEndpoint(sshClient *ssh.Client, root string) (*SFTPReadEndpoint, error) {
+func NewSFTPReader(sshClient *ssh.Client, root string) (*SFTPReader, error) {
 	sftpClient, err := sftp.NewClient(sshClient)
 	if err != nil {
 		return nil, fmt.Errorf("sftp client: %w", err)
 	}
-	return &SFTPReadEndpoint{
+	return &SFTPReader{
 		client: sftpClient,
 		ssh:    sshClient,
 		root:   root,
 	}, nil
 }
 
-// NewSFTPReadEndpointBorrowed creates a read endpoint that borrows the SSH
+// NewSFTPReaderBorrowed creates a read endpoint that borrows the SSH
 // connection. Close() only closes the SFTP client, not the SSH connection
-// (which is owned by the caller, e.g. SSHConnector).
-func NewSFTPReadEndpointBorrowed(sshClient *ssh.Client, root string) (*SFTPReadEndpoint, error) {
+// (which is owned by the caller, e.g. SSHTransport).
+func NewSFTPReaderBorrowed(sshClient *ssh.Client, root string) (*SFTPReader, error) {
 	sftpClient, err := sftp.NewClient(sshClient)
 	if err != nil {
 		return nil, fmt.Errorf("sftp client: %w", err)
 	}
-	return &SFTPReadEndpoint{
+	return &SFTPReader{
 		client: sftpClient,
 		ssh:    nil, // not owned
 		root:   root,
@@ -57,7 +57,7 @@ func NewSFTPReadEndpointBorrowed(sshClient *ssh.Client, root string) (*SFTPReadE
 }
 
 //nolint:revive // cognitive-complexity: SFTP walk with symlink resolution and error handling
-func (e *SFTPReadEndpoint) Walk(fn func(entry FileEntry) error) error {
+func (e *SFTPReader) Walk(fn func(entry FileEntry) error) error {
 	walker := e.client.Walk(e.root)
 	for walker.Step() {
 		if err := walker.Err(); err != nil {
@@ -81,7 +81,7 @@ func (e *SFTPReadEndpoint) Walk(fn func(entry FileEntry) error) error {
 	return nil
 }
 
-func (e *SFTPReadEndpoint) Stat(relPath string) (FileEntry, error) {
+func (e *SFTPReader) Stat(relPath string) (FileEntry, error) {
 	absPath := path.Join(e.root, relPath)
 	info, err := e.client.Lstat(absPath)
 	if err != nil {
@@ -97,7 +97,7 @@ func (e *SFTPReadEndpoint) Stat(relPath string) (FileEntry, error) {
 	return entry, nil
 }
 
-func (e *SFTPReadEndpoint) ReadDir(relPath string) ([]FileEntry, error) {
+func (e *SFTPReader) ReadDir(relPath string) ([]FileEntry, error) {
 	absPath := path.Join(e.root, relPath)
 	infos, err := e.client.ReadDir(absPath)
 	if err != nil {
@@ -119,12 +119,12 @@ func (e *SFTPReadEndpoint) ReadDir(relPath string) ([]FileEntry, error) {
 	return entries, nil
 }
 
-func (e *SFTPReadEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
+func (e *SFTPReader) OpenRead(relPath string) (io.ReadCloser, error) {
 	absPath := path.Join(e.root, relPath)
 	return e.client.Open(absPath)
 }
 
-func (e *SFTPReadEndpoint) Hash(relPath string) (string, error) {
+func (e *SFTPReader) Hash(relPath string) (string, error) {
 	absPath := path.Join(e.root, relPath)
 	f, err := e.client.Open(absPath)
 	if err != nil {
@@ -134,9 +134,9 @@ func (e *SFTPReadEndpoint) Hash(relPath string) (string, error) {
 	return hashReader(f)
 }
 
-func (e *SFTPReadEndpoint) Root() string { return e.root }
+func (e *SFTPReader) Root() string { return e.root }
 
-func (*SFTPReadEndpoint) Caps() Capabilities {
+func (*SFTPReader) Caps() Capabilities {
 	return Capabilities{
 		SparseDetect: false,
 		Hardlinks:    false,
@@ -147,7 +147,7 @@ func (*SFTPReadEndpoint) Caps() Capabilities {
 	}
 }
 
-func (e *SFTPReadEndpoint) Close() error {
+func (e *SFTPReader) Close() error {
 	err := e.client.Close()
 	if e.ssh != nil {
 		if sshErr := e.ssh.Close(); sshErr != nil && err == nil {
@@ -157,48 +157,48 @@ func (e *SFTPReadEndpoint) Close() error {
 	return err
 }
 
-// SFTPWriteEndpoint writes to a remote filesystem over SFTP.
-type SFTPWriteEndpoint struct {
+// SFTPWriter writes to a remote filesystem over SFTP.
+type SFTPWriter struct {
 	client *sftp.Client
 	ssh    *ssh.Client
 	root   string
 }
 
-// NewSFTPWriteEndpoint creates a write endpoint backed by an SFTP connection.
+// NewSFTPWriter creates a write endpoint backed by an SFTP connection.
 // The endpoint owns both the SFTP and SSH clients — Close() closes both.
-func NewSFTPWriteEndpoint(sshClient *ssh.Client, root string) (*SFTPWriteEndpoint, error) {
+func NewSFTPWriter(sshClient *ssh.Client, root string) (*SFTPWriter, error) {
 	sftpClient, err := sftp.NewClient(sshClient)
 	if err != nil {
 		return nil, fmt.Errorf("sftp client: %w", err)
 	}
-	return &SFTPWriteEndpoint{
+	return &SFTPWriter{
 		client: sftpClient,
 		ssh:    sshClient,
 		root:   root,
 	}, nil
 }
 
-// NewSFTPWriteEndpointBorrowed creates a write endpoint that borrows the SSH
+// NewSFTPWriterBorrowed creates a write endpoint that borrows the SSH
 // connection. Close() only closes the SFTP client, not the SSH connection.
-func NewSFTPWriteEndpointBorrowed(sshClient *ssh.Client, root string) (*SFTPWriteEndpoint, error) {
+func NewSFTPWriterBorrowed(sshClient *ssh.Client, root string) (*SFTPWriter, error) {
 	sftpClient, err := sftp.NewClient(sshClient)
 	if err != nil {
 		return nil, fmt.Errorf("sftp client: %w", err)
 	}
-	return &SFTPWriteEndpoint{
+	return &SFTPWriter{
 		client: sftpClient,
 		ssh:    nil, // not owned
 		root:   root,
 	}, nil
 }
 
-func (e *SFTPWriteEndpoint) MkdirAll(relPath string, _ os.FileMode) error {
+func (e *SFTPWriter) MkdirAll(relPath string, _ os.FileMode) error {
 	absPath := path.Join(e.root, relPath)
 	return e.client.MkdirAll(absPath)
 }
 
-//nolint:ireturn // implements WriteEndpoint interface
-func (e *SFTPWriteEndpoint) CreateTemp(relPath string, perm os.FileMode) (WriteFile, error) {
+//nolint:ireturn // implements ReadWriter interface
+func (e *SFTPWriter) CreateTemp(relPath string, perm os.FileMode) (WriteFile, error) {
 	absPath := path.Join(e.root, relPath)
 	dir := path.Dir(absPath)
 	base := path.Base(absPath)
@@ -221,7 +221,7 @@ func (e *SFTPWriteEndpoint) CreateTemp(relPath string, perm os.FileMode) (WriteF
 	return &sftpWriteFile{File: f, relPath: tmpRel}, nil
 }
 
-func (e *SFTPWriteEndpoint) Rename(oldRel, newRel string) error {
+func (e *SFTPWriter) Rename(oldRel, newRel string) error {
 	oldAbs := path.Join(e.root, oldRel)
 	newAbs := path.Join(e.root, newRel)
 	// SFTP rename fails if target exists; remove first.
@@ -229,23 +229,23 @@ func (e *SFTPWriteEndpoint) Rename(oldRel, newRel string) error {
 	return e.client.Rename(oldAbs, newAbs)
 }
 
-func (e *SFTPWriteEndpoint) Remove(relPath string) error {
+func (e *SFTPWriter) Remove(relPath string) error {
 	absPath := path.Join(e.root, relPath)
 	return e.client.Remove(absPath)
 }
 
-func (e *SFTPWriteEndpoint) RemoveAll(relPath string) error {
+func (e *SFTPWriter) RemoveAll(relPath string) error {
 	absPath := path.Join(e.root, relPath)
 	return removeAllSFTP(e.client, absPath)
 }
 
-func (e *SFTPWriteEndpoint) Symlink(target, newRel string) error {
+func (e *SFTPWriter) Symlink(target, newRel string) error {
 	absNew := path.Join(e.root, newRel)
 	_ = e.client.Remove(absNew) //nolint:errcheck // best-effort cleanup
 	return e.client.Symlink(target, absNew)
 }
 
-func (e *SFTPWriteEndpoint) Link(oldRel, newRel string) error {
+func (e *SFTPWriter) Link(oldRel, newRel string) error {
 	oldAbs := path.Join(e.root, oldRel)
 	newAbs := path.Join(e.root, newRel)
 	_ = e.client.Remove(newAbs) //nolint:errcheck // best-effort cleanup before link
@@ -253,7 +253,7 @@ func (e *SFTPWriteEndpoint) Link(oldRel, newRel string) error {
 }
 
 //nolint:revive // cognitive-complexity: applies multiple metadata operations conditionally
-func (e *SFTPWriteEndpoint) SetMetadata(relPath string, entry FileEntry, opts MetadataOpts) error {
+func (e *SFTPWriter) SetMetadata(relPath string, entry FileEntry, opts MetadataOpts) error {
 	absPath := path.Join(e.root, relPath)
 
 	if opts.Mode {
@@ -281,7 +281,7 @@ func (e *SFTPWriteEndpoint) SetMetadata(relPath string, entry FileEntry, opts Me
 }
 
 //nolint:revive // cognitive-complexity: SFTP walk with symlink resolution and error handling
-func (e *SFTPWriteEndpoint) Walk(fn func(entry FileEntry) error) error {
+func (e *SFTPWriter) Walk(fn func(entry FileEntry) error) error {
 	walker := e.client.Walk(e.root)
 	for walker.Step() {
 		if err := walker.Err(); err != nil {
@@ -305,7 +305,7 @@ func (e *SFTPWriteEndpoint) Walk(fn func(entry FileEntry) error) error {
 	return nil
 }
 
-func (e *SFTPWriteEndpoint) Stat(relPath string) (FileEntry, error) {
+func (e *SFTPWriter) Stat(relPath string) (FileEntry, error) {
 	absPath := path.Join(e.root, relPath)
 	info, err := e.client.Lstat(absPath)
 	if err != nil {
@@ -321,12 +321,12 @@ func (e *SFTPWriteEndpoint) Stat(relPath string) (FileEntry, error) {
 	return entry, nil
 }
 
-func (e *SFTPWriteEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
+func (e *SFTPWriter) OpenRead(relPath string) (io.ReadCloser, error) {
 	absPath := path.Join(e.root, relPath)
 	return e.client.Open(absPath)
 }
 
-func (e *SFTPWriteEndpoint) Hash(relPath string) (string, error) {
+func (e *SFTPWriter) Hash(relPath string) (string, error) {
 	absPath := path.Join(e.root, relPath)
 	f, err := e.client.Open(absPath)
 	if err != nil {
@@ -336,9 +336,9 @@ func (e *SFTPWriteEndpoint) Hash(relPath string) (string, error) {
 	return hashReader(f)
 }
 
-func (e *SFTPWriteEndpoint) Root() string { return e.root }
+func (e *SFTPWriter) Root() string { return e.root }
 
-func (*SFTPWriteEndpoint) Caps() Capabilities {
+func (*SFTPWriter) Caps() Capabilities {
 	return Capabilities{
 		SparseDetect: false,
 		Hardlinks:    false,
@@ -349,7 +349,7 @@ func (*SFTPWriteEndpoint) Caps() Capabilities {
 	}
 }
 
-func (e *SFTPWriteEndpoint) Close() error {
+func (e *SFTPWriter) Close() error {
 	err := e.client.Close()
 	if e.ssh != nil {
 		if sshErr := e.ssh.Close(); sshErr != nil && err == nil {

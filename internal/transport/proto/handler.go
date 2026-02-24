@@ -26,8 +26,8 @@ const batchWriteParallel = 16
 // Handler dispatches incoming protocol frames to endpoint operations.
 // One Handler is created per client connection.
 type Handler struct {
-	read  transport.ReadEndpoint
-	write transport.WriteEndpoint
+	read  transport.Reader
+	write transport.ReadWriter
 
 	mux *Mux
 
@@ -36,7 +36,7 @@ type Handler struct {
 }
 
 // NewHandler creates a new request handler backed by the given endpoints.
-func NewHandler(read transport.ReadEndpoint, write transport.WriteEndpoint, mux *Mux) *Handler {
+func NewHandler(read transport.Reader, write transport.ReadWriter, mux *Mux) *Handler {
 	return &Handler{
 		read:  read,
 		write: write,
@@ -58,7 +58,7 @@ func (h *Handler) ServeStream(streamID uint32, ch <-chan Frame) {
 //nolint:gocyclo,revive // cyclomatic: protocol message dispatcher with one case per message type
 func (h *Handler) dispatch(streamID uint32, f Frame) error {
 	switch f.MsgType {
-	// ReadEndpoint operations.
+	// Reader operations.
 	case MsgWalkReq:
 		return h.handleWalk(streamID, f.Payload)
 	case MsgStatReq:
@@ -70,7 +70,7 @@ func (h *Handler) dispatch(streamID uint32, f Frame) error {
 	case MsgHashReq:
 		return h.handleHash(streamID, f.Payload)
 
-	// WriteEndpoint operations.
+	// ReadWriter operations.
 	case MsgMkdirAllReq:
 		return h.handleMkdirAll(streamID, f.Payload)
 	case MsgCreateTempReq:
@@ -221,7 +221,14 @@ func (h *Handler) handleReadDir(streamID uint32, data []byte) error {
 		return fmt.Errorf("decode ReadDirReq: %w", err)
 	}
 
-	entries, err := h.read.ReadDir(req.RelPath)
+	type readDirer interface {
+		ReadDir(relPath string) ([]transport.FileEntry, error)
+	}
+	rd, ok := h.read.(readDirer)
+	if !ok {
+		return errors.New("endpoint does not support ReadDir")
+	}
+	entries, err := rd.ReadDir(req.RelPath)
 	if err != nil {
 		return err
 	}

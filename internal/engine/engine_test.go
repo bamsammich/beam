@@ -16,11 +16,11 @@ import (
 	"github.com/bamsammich/beam/internal/transport"
 )
 
-// localConns returns a pair of LocalConnectors for tests.
+// localConns returns a pair of LocalTransports for tests.
 //
 //nolint:ireturn // test helper
-func localConns() (transport.Connector, transport.Connector) {
-	return transport.NewLocalConnector(), transport.NewLocalConnector()
+func localConns() (transport.Transport, transport.Transport) {
+	return transport.NewLocalTransport(), transport.NewLocalTransport()
 }
 
 func hashFile(t *testing.T, path string) []byte {
@@ -57,8 +57,8 @@ func TestEngine_CopyTree(t *testing.T) {
 		Archive:      true,
 		Workers:      4,
 		Recursive:    true,
-		SrcConnector: srcConn,
-		DstConnector: dstConn,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -101,8 +101,8 @@ func TestEngine_SingleFile(t *testing.T) {
 		Sources:      []string{src},
 		Dst:          dst,
 		Workers:      1,
-		SrcConnector: srcConn,
-		DstConnector: dstConn,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -124,8 +124,8 @@ func TestEngine_SingleFileIntoDirDst(t *testing.T) {
 		Sources:      []string{src},
 		Dst:          dstDir,
 		Workers:      1,
-		SrcConnector: srcConn,
-		DstConnector: dstConn,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -147,8 +147,8 @@ func TestEngine_DirWithoutRecursive(t *testing.T) {
 		Sources:      []string{src},
 		Dst:          dst,
 		Workers:      1,
-		SrcConnector: srcConn,
-		DstConnector: dstConn,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.Error(t, result.Err)
@@ -178,8 +178,8 @@ func TestEngine_ContextCancel(t *testing.T) {
 		Dst:          dst,
 		Recursive:    true,
 		Workers:      4,
-		SrcConnector: srcConn,
-		DstConnector: dstConn,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	// With immediate cancel, might get an error or partial copy.
@@ -205,8 +205,8 @@ func TestEngine_DryRun(t *testing.T) {
 		Recursive:    true,
 		DryRun:       true,
 		Workers:      2,
-		SrcConnector: srcConn,
-		DstConnector: dstConn,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -226,8 +226,8 @@ func TestEngine_SourceNotExist(t *testing.T) {
 		Sources:      []string{"/nonexistent/path"},
 		Dst:          "/tmp/dst",
 		Workers:      1,
-		SrcConnector: srcConn,
-		DstConnector: dstConn,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 	assert.Error(t, result.Err)
 }
@@ -262,8 +262,8 @@ func TestEngine_EventSequence(t *testing.T) {
 		Recursive:    true,
 		Workers:      2,
 		Events:       events,
-		SrcConnector: srcConn,
-		DstConnector: dstConn,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	close(events)
@@ -306,8 +306,8 @@ func TestEngine_WithFilter(t *testing.T) {
 		Recursive:    true,
 		Workers:      2,
 		Filter:       chain,
-		SrcConnector: srcConn,
-		DstConnector: dstConn,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -341,8 +341,8 @@ func TestEngine_DeleteExtraneous(t *testing.T) {
 		Recursive:    true,
 		Workers:      2,
 		Delete:       true,
-		SrcConnector: srcConn,
-		DstConnector: dstConn,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -375,8 +375,8 @@ func TestEngine_SkipUnchanged(t *testing.T) {
 		Recursive:    true,
 		Archive:      true,
 		Workers:      2,
-		SrcConnector: srcConn1,
-		DstConnector: dstConn1,
+		SrcTransport: srcConn1,
+		DstTransport: dstConn1,
 	})
 	require.NoError(t, result1.Err)
 	assert.Equal(t, int64(3), result1.Stats.FilesCopied)
@@ -389,8 +389,8 @@ func TestEngine_SkipUnchanged(t *testing.T) {
 		Recursive:    true,
 		Archive:      true,
 		Workers:      2,
-		SrcConnector: srcConn2,
-		DstConnector: dstConn2,
+		SrcTransport: srcConn2,
+		DstTransport: dstConn2,
 	})
 	require.NoError(t, result2.Err)
 	assert.Equal(t, int64(0), result2.Stats.FilesCopied)
@@ -412,8 +412,8 @@ func TestEngine_SkipUnchanged_NoArchive(t *testing.T) {
 		Dst:          dst,
 		Recursive:    true,
 		Workers:      2,
-		SrcConnector: srcConn1,
-		DstConnector: dstConn1,
+		SrcTransport: srcConn1,
+		DstTransport: dstConn1,
 	})
 	require.NoError(t, result1.Err)
 	assert.Equal(t, int64(2), result1.Stats.FilesCopied)
@@ -426,8 +426,8 @@ func TestEngine_SkipUnchanged_NoArchive(t *testing.T) {
 		Dst:          dst,
 		Recursive:    true,
 		Workers:      2,
-		SrcConnector: srcConn2,
-		DstConnector: dstConn2,
+		SrcTransport: srcConn2,
+		DstTransport: dstConn2,
 	})
 	require.NoError(t, result2.Err)
 	assert.Equal(t, int64(0), result2.Stats.FilesCopied)
@@ -450,8 +450,8 @@ func TestEngine_RecopiesDeletedFiles(t *testing.T) {
 		Recursive:    true,
 		Archive:      true,
 		Workers:      1,
-		SrcConnector: srcConn1,
-		DstConnector: dstConn1,
+		SrcTransport: srcConn1,
+		DstTransport: dstConn1,
 	})
 	require.NoError(t, result1.Err)
 	assert.Equal(t, int64(2), result1.Stats.FilesCopied)
@@ -467,8 +467,8 @@ func TestEngine_RecopiesDeletedFiles(t *testing.T) {
 		Recursive:    true,
 		Archive:      true,
 		Workers:      1,
-		SrcConnector: srcConn2,
-		DstConnector: dstConn2,
+		SrcTransport: srcConn2,
+		DstTransport: dstConn2,
 	})
 	require.NoError(t, result2.Err)
 	assert.Equal(t, int64(1), result2.Stats.FilesCopied)
@@ -495,8 +495,8 @@ func TestEngine_MultiSourceFiles(t *testing.T) {
 		Sources:      []string{file1, file2},
 		Dst:          dst,
 		Workers:      2,
-		SrcConnector: srcConn,
-		DstConnector: dstConn,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -529,8 +529,8 @@ func TestEngine_MultiSourceDirs(t *testing.T) {
 		Dst:          dst,
 		Recursive:    true,
 		Workers:      2,
-		SrcConnector: srcConn,
-		DstConnector: dstConn,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -564,8 +564,8 @@ func TestEngine_MultiSourceMixed(t *testing.T) {
 		Dst:          dst,
 		Recursive:    true,
 		Workers:      2,
-		SrcConnector: srcConn,
-		DstConnector: dstConn,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -597,8 +597,8 @@ func TestEngine_TrailingSlash_CopyContents(t *testing.T) {
 		Dst:          dst,
 		Recursive:    true,
 		Workers:      2,
-		SrcConnector: srcConn,
-		DstConnector: dstConn,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -633,8 +633,8 @@ func TestEngine_NoTrailingSlash_CopyDir(t *testing.T) {
 		Dst:          dst,
 		Recursive:    true,
 		Workers:      2,
-		SrcConnector: srcConn,
-		DstConnector: dstConn,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -666,8 +666,8 @@ func TestEngine_MultiSourceDstMustBeDir(t *testing.T) {
 		Sources:      []string{file1, file2},
 		Dst:          dstFile,
 		Workers:      1,
-		SrcConnector: srcConn,
-		DstConnector: dstConn,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.Error(t, result.Err)

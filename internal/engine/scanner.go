@@ -23,8 +23,8 @@ type ScannerConfig struct {
 	Events         chan<- event.Event
 	Filter         *filter.Chain
 	Stats          stats.Writer                   // if set, skipped-file stats are recorded directly
-	SrcEndpoint    transport.ReadEndpoint         // nil = local filesystem
-	DstEndpoint    transport.WriteEndpoint        // nil = local filesystem
+	SrcEndpoint    transport.Reader               // nil = local filesystem
+	DstEndpoint    transport.ReadWriter           // nil = local filesystem
 	DstIndex       map[string]transport.FileEntry // pre-populated destination index (avoids per-file Stat RPCs)
 	SrcRoot        string
 	DstRoot        string

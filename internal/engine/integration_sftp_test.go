@@ -89,22 +89,32 @@ func dialTestSSH(t *testing.T, host string, port int) *ssh.Client {
 	return nil
 }
 
-// fixedConnector wraps a pre-created endpoint as a Connector for test use.
-type fixedConnector struct {
-	readEP  transport.ReadEndpoint
-	writeEP transport.WriteEndpoint
+// fixedTransport wraps a pre-created endpoint as a Transport for test use.
+type fixedTransport struct {
+	readEP  transport.Reader
+	writeEP transport.ReadWriter
 }
 
-func (c *fixedConnector) ConnectRead(_ string) (transport.ReadEndpoint, error) {
+func (c *fixedTransport) ReaderAt(_ string) (transport.Reader, error) {
 	return c.readEP, nil
 }
 
-func (c *fixedConnector) ConnectWrite(_ string) (transport.WriteEndpoint, error) {
+func (c *fixedTransport) ReadWriterAt(_ string) (transport.ReadWriter, error) {
 	return c.writeEP, nil
 }
 
-func (*fixedConnector) Protocol() transport.Protocol { return transport.ProtocolSFTP }
-func (*fixedConnector) Close() error                 { return nil }
+func (*fixedTransport) Protocol() transport.Protocol { return transport.ProtocolSFTP }
+func (*fixedTransport) Close() error                 { return nil }
+
+// reRootedReader wraps a transport.Reader and overrides Root() to return
+// a local path. This is needed for SFTP pull tests where the scanner walks
+// the local srcDir but the read endpoint is the SFTP connection.
+type reRootedReader struct {
+	transport.Reader
+	localRoot string
+}
+
+func (r *reRootedReader) Root() string { return r.localRoot }
 
 func TestIntegration_LocalToSFTP(t *testing.T) {
 	t.Parallel()
@@ -120,7 +130,7 @@ func TestIntegration_LocalToSFTP(t *testing.T) {
 	host, port := startSFTPContainer(t, dstDir)
 
 	sshClient := dialTestSSH(t, host, port)
-	dstEP, err := transport.NewSFTPWriteEndpoint(sshClient, "/data")
+	dstEP, err := transport.NewSFTPWriter(sshClient, "/data")
 	require.NoError(t, err)
 	t.Cleanup(func() { dstEP.Close() })
 
@@ -131,8 +141,8 @@ func TestIntegration_LocalToSFTP(t *testing.T) {
 		Recursive:    true,
 		Workers:      2,
 		Events:       drainEvents(t),
-		SrcConnector: transport.NewLocalConnector(),
-		DstConnector: &fixedConnector{writeEP: dstEP},
+		SrcTransport: transport.NewLocalTransport(),
+		DstTransport: &fixedTransport{writeEP: dstEP},
 	})
 
 	require.NoError(t, result.Err)
@@ -155,7 +165,7 @@ func TestIntegration_SFTPToLocal(t *testing.T) {
 	host, port := startSFTPContainer(t, srcDir)
 
 	sshClient := dialTestSSH(t, host, port)
-	sftpReadEP, err := transport.NewSFTPReadEndpoint(sshClient, "/data")
+	sftpReadEP, err := transport.NewSFTPReader(sshClient, "/data")
 	require.NoError(t, err)
 	t.Cleanup(func() { sftpReadEP.Close() })
 
@@ -165,9 +175,9 @@ func TestIntegration_SFTPToLocal(t *testing.T) {
 	// and then reads via SrcEndpoint.OpenRead(relSrc). The re-rooted wrapper
 	// makes Root() return srcDir so the relative path is correct for the
 	// SFTP endpoint whose root is /data (the chroot-relative mount point).
-	srcEP := &reRootedReadEndpoint{
-		ReadEndpoint: sftpReadEP,
-		localRoot:    srcDir,
+	srcEP := &reRootedReader{
+		Reader:    sftpReadEP,
+		localRoot: srcDir,
 	}
 
 	result := engine.Run(context.Background(), engine.Config{
@@ -177,8 +187,8 @@ func TestIntegration_SFTPToLocal(t *testing.T) {
 		Recursive:    true,
 		Workers:      2,
 		Events:       drainEvents(t),
-		SrcConnector: &fixedConnector{readEP: srcEP},
-		DstConnector: transport.NewLocalConnector(),
+		SrcTransport: &fixedTransport{readEP: srcEP},
+		DstTransport: transport.NewLocalTransport(),
 	})
 
 	require.NoError(t, result.Err)

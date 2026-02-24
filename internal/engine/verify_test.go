@@ -39,8 +39,8 @@ func TestVerify_MatchingFiles(t *testing.T) {
 		Workers:     2,
 		Stats:       collector,
 		Events:      events,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	})
 	close(events)
 
@@ -70,8 +70,8 @@ func TestVerify_CorruptedFile(t *testing.T) {
 		Workers:     1,
 		Stats:       collector,
 		Events:      events,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	})
 	close(events)
 
@@ -112,8 +112,8 @@ func TestVerify_FilterRespected(t *testing.T) {
 		Filter:      chain,
 		Stats:       collector,
 		Events:      events,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	})
 	close(events)
 
@@ -152,8 +152,8 @@ func TestVerify_Events(t *testing.T) {
 		Workers:     1,
 		Stats:       collector,
 		Events:      events,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	})
 	close(events)
 	<-done
@@ -183,8 +183,8 @@ func TestEngine_CopyWithVerify(t *testing.T) {
 		Recursive:    true,
 		Workers:      2,
 		Verify:       true,
-		SrcConnector: srcConn,
-		DstConnector: dstConn,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -208,8 +208,8 @@ func TestEngine_VerifySkippedOnDryRun(t *testing.T) {
 		Workers:      1,
 		Verify:       true,
 		DryRun:       true,
-		SrcConnector: srcConn2,
-		DstConnector: dstConn2,
+		SrcTransport: srcConn2,
+		DstTransport: dstConn2,
 	})
 
 	require.NoError(t, result.Err)

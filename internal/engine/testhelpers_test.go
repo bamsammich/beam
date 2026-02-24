@@ -133,37 +133,37 @@ func startTestDaemon(t *testing.T, root string) (addr, token string) {
 	return daemon.Addr().String(), token
 }
 
-// dialBeamConnector dials a beam daemon and returns a Connector.
+// dialBeamTransport dials a beam daemon and returns a Transport.
 // The underlying mux is closed on test cleanup.
 //
-//nolint:ireturn // test helper returns Connector
-func dialBeamConnector(t *testing.T, addr, token, root string) transport.Connector {
+//nolint:ireturn // test helper returns Transport
+func dialBeamTransport(t *testing.T, addr, token, root string) transport.Transport {
 	t.Helper()
 
 	mux, _, caps, err := beam.DialBeam(addr, token, proto.ClientTLSConfig(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 
-	return beam.NewConnectorFromMux(mux, root, caps)
+	return beam.NewTransportFromMux(mux, root, caps)
 }
 
-// dialBeamConnectorCustomRoots dials a beam daemon and returns a Connector
+// dialBeamTransportCustomRoots dials a beam daemon and returns a Transport
 // with explicit daemonRoot. This allows tests to simulate non-local source
 // paths by constructing a pathPrefix that maps a fictional client-side root
 // to real data on the daemon.
 //
-//nolint:ireturn // test helper returns Connector
-func dialBeamConnectorCustomRoots(
+//nolint:ireturn // test helper returns Transport
+func dialBeamTransportCustomRoots(
 	t *testing.T,
 	addr, token, daemonRoot string,
-) transport.Connector {
+) transport.Transport {
 	t.Helper()
 
 	mux, _, caps, err := beam.DialBeam(addr, token, proto.ClientTLSConfig(true))
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 
-	return beam.NewConnectorFromMux(mux, daemonRoot, caps)
+	return beam.NewTransportFromMux(mux, daemonRoot, caps)
 }
 
 // createModifiedTestTree creates a test tree at root that is slightly

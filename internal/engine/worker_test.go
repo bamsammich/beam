@@ -29,8 +29,8 @@ func newTestWorkerPool(
 		PreserveTimes: true,
 		Stats:         s,
 		DstRoot:       dstRoot,
-		SrcEndpoint:   transport.NewLocalReadEndpoint("/"),
-		DstEndpoint:   transport.NewLocalWriteEndpoint(dstRoot),
+		SrcEndpoint:   transport.NewLocalReader("/"),
+		DstEndpoint:   transport.NewLocalWriter(dstRoot),
 	}
 	for _, o := range opts {
 		o(&cfg)
