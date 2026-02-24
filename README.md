@@ -1,6 +1,10 @@
-# beam
+<p align="center">
+  <img src="assets/beam_logo.png" alt="beam logo" width="500">
+</p>
 
-**Fast, parallel file copy with delta sync and a beautiful CLI**
+<h1 align="center">beam</h1>
+
+<p align="center"><strong>Fast, parallel file copy with delta sync and a beautiful CLI</strong></p>
 
 [![CI](https://github.com/bamsammich/beam/actions/workflows/ci.yml/badge.svg)](https://github.com/bamsammich/beam/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/github/go-mod/go-version/bamsammich/beam)](https://go.dev/)
