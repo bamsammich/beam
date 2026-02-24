@@ -25,8 +25,8 @@ func TestWriteDaemonDiscovery(t *testing.T) {
 	setTestDiscoveryPath(t, dir)
 
 	err := config.WriteDaemonDiscovery(config.DaemonDiscovery{
-		Token: "test-token-abc123",
-		Port:  9876,
+		Fingerprint: "SHA256:testfingerprint123",
+		Port:        9876,
 	})
 	require.NoError(t, err)
 
@@ -34,7 +34,7 @@ func TestWriteDaemonDiscovery(t *testing.T) {
 	path := filepath.Join(dir, "beam", "daemon.toml")
 	data, err := os.ReadFile(path)
 	require.NoError(t, err)
-	assert.Contains(t, string(data), `token = "test-token-abc123"`)
+	assert.Contains(t, string(data), `fingerprint = "SHA256:testfingerprint123"`)
 	assert.Contains(t, string(data), "port = 9876")
 
 	// File permissions should be world-readable.
@@ -50,14 +50,14 @@ func TestReadDaemonDiscovery(t *testing.T) {
 	configDir := filepath.Join(dir, "beam")
 	require.NoError(t, os.MkdirAll(configDir, 0o755))
 
-	content := "token = \"my-token\"\nport = 1234\n"
+	content := "fingerprint = \"SHA256:abc\"\nport = 1234\n"
 	require.NoError(t, os.WriteFile(
 		filepath.Join(configDir, "daemon.toml"), []byte(content), 0o644,
 	))
 
 	d, err := config.ReadDaemonDiscovery()
 	require.NoError(t, err)
-	assert.Equal(t, "my-token", d.Token)
+	assert.Equal(t, "SHA256:abc", d.Fingerprint)
 	assert.Equal(t, 1234, d.Port)
 }
 
@@ -75,8 +75,8 @@ func TestRemoveDaemonDiscovery(t *testing.T) {
 
 	// Write then remove.
 	require.NoError(t, config.WriteDaemonDiscovery(config.DaemonDiscovery{
-		Token: "x",
-		Port:  1,
+		Fingerprint: "x",
+		Port:        1,
 	}))
 	config.RemoveDaemonDiscovery()
 

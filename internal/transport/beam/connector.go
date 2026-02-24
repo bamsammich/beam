@@ -23,11 +23,11 @@ var (
 // because beam endpoints share a mux with sequentially-allocated stream IDs.
 type Transport struct {
 	tlsConfig *tls.Config
+	authOpts  proto.AuthOpts
 	mux       *proto.Mux
 	readEP    *Reader
 	writeEP   *Writer
 	addr      string
-	token     string
 	root      string
 	caps      transport.Capabilities
 	connected bool
@@ -35,10 +35,10 @@ type Transport struct {
 
 // NewTransport creates a transport for a direct beam:// URL.
 // Connection is lazy — the first ReaderAt or ReadWriterAt triggers DialBeam.
-func NewTransport(addr, token string, tlsConfig *tls.Config) *Transport {
+func NewTransport(addr string, authOpts proto.AuthOpts, tlsConfig *tls.Config) *Transport {
 	return &Transport{
 		addr:      addr,
-		token:     token,
+		authOpts:  authOpts,
 		tlsConfig: tlsConfig,
 	}
 }
@@ -58,7 +58,7 @@ func (c *Transport) connect() error {
 	if c.connected {
 		return nil
 	}
-	mux, root, caps, err := DialBeam(c.addr, c.token, c.tlsConfig)
+	mux, root, caps, err := DialBeam(c.addr, c.authOpts, c.tlsConfig)
 	if err != nil {
 		return err
 	}
@@ -110,10 +110,11 @@ func (c *Transport) Close() error {
 
 // SSHTransportOpts configures an SSH transport.
 type SSHTransportOpts struct {
-	Host    string
-	User    string
-	SSHOpts transport.SSHOpts
-	NoBeam  bool
+	AuthOpts proto.AuthOpts
+	Host     string
+	User     string
+	SSHOpts  transport.SSHOpts
+	NoBeam   bool
 }
 
 // SSHTransport handles SSH with beam auto-detection.
@@ -145,7 +146,7 @@ func (c *SSHTransport) ensureConnected() error {
 	if !c.opts.NoBeam {
 		discovery, discErr := ReadRemoteDaemonDiscovery(sshClient)
 		if discErr == nil {
-			mux, root, caps, tunnelErr := DialBeamTunnel(sshClient, discovery)
+			mux, root, caps, tunnelErr := DialBeamTunnel(sshClient, discovery, c.opts.AuthOpts)
 			if tunnelErr == nil {
 				slog.Info("using beam protocol (daemon detected on remote)")
 				c.inner = NewTransportFromMux(mux, root, caps)

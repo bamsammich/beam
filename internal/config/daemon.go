@@ -30,8 +30,8 @@ func SetDaemonDiscoveryPathOverride(path string) {
 // Remote clients read this file over SFTP to discover and authenticate with a
 // running beam daemon.
 type DaemonDiscovery struct {
-	Token string `toml:"token"`
-	Port  int    `toml:"port"`
+	Fingerprint string `toml:"fingerprint"`
+	Port        int    `toml:"port"`
 }
 
 // DaemonDiscoveryPath returns the path to the daemon discovery file.

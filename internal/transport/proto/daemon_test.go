@@ -2,25 +2,41 @@ package proto_test
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/bamsammich/beam/internal/transport/proto"
 )
 
-func TestDaemonHandshakeSuccess(t *testing.T) {
+func testAuthOpts(t *testing.T) proto.AuthOpts {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	signer, err := ssh.NewSignerFromKey(key)
+	require.NoError(t, err)
+	return proto.AuthOpts{
+		Username: "testuser",
+		Signer:   signer,
+	}
+}
+
+func TestDaemonAuthSuccess(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
+	authOpts := testAuthOpts(t)
 
 	daemon, err := proto.NewDaemon(proto.DaemonConfig{
 		ListenAddr: "127.0.0.1:0",
 		Root:       dir,
-		AuthToken:  "test-token",
+		KeyChecker: func(_ string, _ ssh.PublicKey) bool { return true },
 	})
 	require.NoError(t, err)
 
@@ -31,56 +47,32 @@ func TestDaemonHandshakeSuccess(t *testing.T) {
 
 	// Connect as client.
 	addr := daemon.Addr().String()
-	conn, err := tls.Dial("tcp", addr, proto.ClientTLSConfig(true))
+	conn, err := tls.Dial("tcp", addr, proto.ClientTLSConfig())
 	require.NoError(t, err)
 	defer conn.Close()
 
 	mux := proto.NewMux(conn)
-	controlCh := mux.OpenStream(proto.ControlStream)
-
 	go mux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
 
-	// Send handshake.
-	req := proto.HandshakeReq{
-		Version:   proto.ProtocolVersion,
-		AuthToken: "test-token",
-	}
-	payload, err := req.MarshalMsg(nil)
-	require.NoError(t, err)
-
-	require.NoError(t, mux.Send(proto.Frame{
-		StreamID: proto.ControlStream,
-		MsgType:  proto.MsgHandshakeReq,
-		Payload:  payload,
-	}))
-
-	// Expect HandshakeResp.
-	select {
-	case f := <-controlCh:
-		assert.Equal(t, proto.MsgHandshakeResp, f.MsgType)
-
-		var resp proto.HandshakeResp
-		_, err := resp.UnmarshalMsg(f.Payload)
-		require.NoError(t, err)
-		assert.Equal(t, proto.ProtocolVersion, resp.Version)
-		assert.Equal(t, dir, resp.Root)
-	case <-time.After(5 * time.Second):
-		t.Fatal("timeout waiting for handshake response")
-	}
+	// Perform pubkey auth.
+	root, authErr := proto.ClientAuth(mux, authOpts)
+	require.NoError(t, authErr)
+	assert.Equal(t, dir, root)
 
 	mux.Close()
 	cancel()
 }
 
-func TestDaemonHandshakeWrongToken(t *testing.T) {
+func TestDaemonAuthRejected(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
+	authOpts := testAuthOpts(t)
 
 	daemon, err := proto.NewDaemon(proto.DaemonConfig{
 		ListenAddr: "127.0.0.1:0",
 		Root:       dir,
-		AuthToken:  "correct-token",
+		KeyChecker: func(_ string, _ ssh.PublicKey) bool { return false },
 	})
 	require.NoError(t, err)
 
@@ -89,61 +81,31 @@ func TestDaemonHandshakeWrongToken(t *testing.T) {
 
 	go daemon.Serve(ctx) //nolint:errcheck // test daemon; error not needed
 
-	// Connect with wrong token.
+	// Connect as client.
 	addr := daemon.Addr().String()
-	conn, err := tls.Dial("tcp", addr, proto.ClientTLSConfig(true))
+	conn, err := tls.Dial("tcp", addr, proto.ClientTLSConfig())
 	require.NoError(t, err)
 	defer conn.Close()
 
 	mux := proto.NewMux(conn)
-	controlCh := mux.OpenStream(proto.ControlStream)
-
 	go mux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
 
-	// Send handshake with wrong token.
-	req := proto.HandshakeReq{
-		Version:   proto.ProtocolVersion,
-		AuthToken: "wrong-token",
-	}
-	payload, err := req.MarshalMsg(nil)
-	require.NoError(t, err)
-
-	require.NoError(t, mux.Send(proto.Frame{
-		StreamID: proto.ControlStream,
-		MsgType:  proto.MsgHandshakeReq,
-		Payload:  payload,
-	}))
-
-	// Expect ErrorResp (or channel close if the server disconnects first).
-	// The server sends the error and then closes the connection, so we may
-	// receive the error frame or the channel may close (zero-value frame).
-	gotError := false
-	for f := range controlCh {
-		if f.MsgType == proto.MsgErrorResp {
-			var resp proto.ErrorResp
-			_, unmarshalErr := resp.UnmarshalMsg(f.Payload)
-			require.NoError(t, unmarshalErr)
-			assert.Contains(t, resp.Message, "authentication failed")
-			gotError = true
-			break
-		}
-	}
-
-	// It's acceptable if the connection closed before we received the error,
-	// since the daemon correctly rejected the auth. But if we did get a frame,
-	// it must be the error.
-	_ = gotError
+	// Perform pubkey auth — should fail.
+	_, authErr := proto.ClientAuth(mux, authOpts)
+	require.Error(t, authErr, "expected auth rejection")
 
 	mux.Close()
 	cancel()
 }
 
-func TestDaemonRequiresConfig(t *testing.T) {
+func TestDaemonDefaultConfig(t *testing.T) {
 	t.Parallel()
 
-	_, err := proto.NewDaemon(proto.DaemonConfig{})
-	require.Error(t, err)
+	// Empty config should succeed — daemon defaults to root=/ and generates a cert.
+	d, err := proto.NewDaemon(proto.DaemonConfig{ListenAddr: "127.0.0.1:0"})
+	require.NoError(t, err)
 
-	_, err = proto.NewDaemon(proto.DaemonConfig{Root: "/tmp"})
-	require.Error(t, err)
+	// Should have a valid fingerprint.
+	assert.NotEmpty(t, d.Fingerprint())
+	assert.Contains(t, d.Fingerprint(), "SHA256:")
 }

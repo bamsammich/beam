@@ -14,3 +14,4 @@
 | 2026-02-24 | [Delta transfer with xxHash + BLAKE3](20260224_delta_transfer_xxhash_blake3.md) | — |
 | 2026-02-24 | [Zero-config daemon with auto-token discovery](20260224_zero_config_daemon.md) | — |
 | 2026-02-24 | [SSH beam auto-detection with transparent upgrade](20260224_ssh_beam_auto_detection.md) | — |
+| 2026-02-24 | [TLS fingerprint pinning + SSH pubkey auth + fork-per-connection](20260224_tls_pubkey_auth_fork.md) | `20260224_zero_config_daemon.md` |

@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/bamsammich/beam/internal/transport"
 	"github.com/bamsammich/beam/internal/transport/beam"
@@ -16,7 +17,7 @@ import (
 )
 
 // TestDialBeamConn verifies the beam handshake over a raw net.Pipe connection
-// (no TLS). The server side is a full daemon handler goroutine, the client side
+// (no TLS). The server side simulates the pubkey auth flow, the client side
 // calls DialBeamConn.
 func TestDialBeamConn(t *testing.T) {
 	t.Parallel()
@@ -29,12 +30,12 @@ func TestDialBeamConn(t *testing.T) {
 		filepath.Join(dir, "sub", "nested.txt"), []byte("nested"), 0o644,
 	))
 
-	token := "pipe-test-token"
+	authOpts := generateTestAuthOpts(t)
 
 	// Create a net.Pipe — bidirectional in-memory connection.
 	clientConn, serverConn := net.Pipe()
 
-	// Start the server side: create mux, handler, and handshake listener.
+	// Start the server side: create mux, handler, and auth listener.
 	readEP := transport.NewLocalReader(dir)
 	writeEP := transport.NewLocalWriter(dir)
 	serverMux := proto.NewMux(serverConn)
@@ -48,47 +49,26 @@ func TestDialBeamConn(t *testing.T) {
 
 	go serverMux.Run() //nolint:errcheck // test server; error not needed
 
-	// Run a minimal handshake on the server side.
+	// Run a pubkey auth flow on the server side.
 	go func() {
 		defer serverMux.Close()
 
-		// Wait for handshake request.
-		f := <-controlCh
-		if f.MsgType != proto.MsgHandshakeReq {
-			return
-		}
-		var req proto.HandshakeReq
-		if _, err := req.UnmarshalMsg(f.Payload); err != nil {
-			return
-		}
-		if req.AuthToken != token {
-			resp := proto.ErrorResp{Message: "auth failed"}
-			payload, _ := resp.MarshalMsg(nil) //nolint:errcheck // best-effort error response
-			_ = serverMux.Send(proto.Frame{    //nolint:errcheck // best-effort error response
-				StreamID: proto.ControlStream,
-				MsgType:  proto.MsgErrorResp,
-				Payload:  payload,
-			})
-			return
-		}
+		// Use ServerAuth with a key checker that accepts the test key.
+		sa := proto.NewServerAuth(dir)
+		sa.KeyChecker = func(_ string, _ ssh.PublicKey) bool { return true }
 
-		resp := proto.HandshakeResp{
-			Version: proto.ProtocolVersion,
-			Root:    dir,
+		username, err := sa.Authenticate(serverMux, controlCh)
+		if err != nil {
+			return
 		}
-		payload, _ := resp.MarshalMsg(nil) //nolint:errcheck // test helper
-		_ = serverMux.Send(proto.Frame{    //nolint:errcheck // test helper
-			StreamID: proto.ControlStream,
-			MsgType:  proto.MsgHandshakeResp,
-			Payload:  payload,
-		})
+		_ = username
 
 		// Keep the server alive until mux closes.
 		<-serverMux.Done()
 	}()
 
 	// Client side: DialBeamConn over the pipe.
-	mux, root, caps, err := beam.DialBeamConn(clientConn, token)
+	mux, root, caps, err := beam.DialBeamConn(clientConn, authOpts)
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 

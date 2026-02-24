@@ -3,32 +3,44 @@ package proto
 import (
 	"context"
 	"crypto/tls"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net"
+	"os/user"
+	"strconv"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 
 	"github.com/bamsammich/beam/internal/transport"
 )
 
 // DaemonConfig configures a beam protocol daemon.
 type DaemonConfig struct {
-	TLSCert    *tls.Certificate
+	TLSCert *tls.Certificate
+	// KeyChecker overrides the default authorized_keys validation in
+	// ServerAuth. If set, called instead of checking ~/.ssh/authorized_keys.
+	// Intended for tests.
+	KeyChecker func(username string, pubkey ssh.PublicKey) bool
 	ListenAddr string
 	Root       string
-	AuthToken  string //nolint:gosec // G117: field name is descriptive, not a credential leak
+	// ForkMode controls whether the daemon forks a child process per connection
+	// to run as the authenticated user. When false (e.g. in tests or
+	// single-user mode), the daemon handles connections in-process.
+	ForkMode bool
 }
 
 // Daemon serves the beam protocol over TLS.
 type Daemon struct {
-	listener net.Listener
-	readEP   *transport.LocalReader
-	writeEP  *transport.LocalWriter
-	conns    map[net.Conn]struct{}
-	cfg      DaemonConfig
-	mu       sync.Mutex
+	listener    net.Listener
+	readEP      *transport.LocalReader
+	writeEP     *transport.LocalWriter
+	conns       map[net.Conn]struct{}
+	auth        *ServerAuth
+	fingerprint string
+	cfg         DaemonConfig
+	mu          sync.Mutex
 }
 
 // NewDaemon creates a new beam daemon. Call Serve to start accepting connections.
@@ -36,20 +48,27 @@ func NewDaemon(cfg DaemonConfig) (*Daemon, error) {
 	if cfg.Root == "" {
 		cfg.Root = "/"
 	}
-	if cfg.AuthToken == "" {
-		return nil, errors.New("daemon auth token is required")
-	}
 
 	var tlsCert tls.Certificate
+	var fingerprint string
 	if cfg.TLSCert != nil {
 		tlsCert = *cfg.TLSCert
+		var err error
+		fingerprint, err = CertFingerprint(tlsCert)
+		if err != nil {
+			return nil, fmt.Errorf("compute cert fingerprint: %w", err)
+		}
 	} else {
 		var err error
 		tlsCert, err = GenerateSelfSignedCert()
 		if err != nil {
 			return nil, fmt.Errorf("generate self-signed cert: %w", err)
 		}
-		slog.Info("generated self-signed TLS certificate")
+		fingerprint, err = CertFingerprint(tlsCert)
+		if err != nil {
+			return nil, fmt.Errorf("compute cert fingerprint: %w", err)
+		}
+		slog.Info("generated self-signed TLS certificate", "fingerprint", fingerprint)
 	}
 
 	tlsConfig := &tls.Config{
@@ -62,18 +81,28 @@ func NewDaemon(cfg DaemonConfig) (*Daemon, error) {
 		return nil, fmt.Errorf("listen %s: %w", cfg.ListenAddr, err)
 	}
 
+	auth := NewServerAuth(cfg.Root)
+	auth.KeyChecker = cfg.KeyChecker
+
 	return &Daemon{
-		cfg:      cfg,
-		listener: listener,
-		readEP:   transport.NewLocalReader(cfg.Root),
-		writeEP:  transport.NewLocalWriter(cfg.Root),
-		conns:    make(map[net.Conn]struct{}),
+		cfg:         cfg,
+		listener:    listener,
+		readEP:      transport.NewLocalReader(cfg.Root),
+		writeEP:     transport.NewLocalWriter(cfg.Root),
+		conns:       make(map[net.Conn]struct{}),
+		auth:        auth,
+		fingerprint: fingerprint,
 	}, nil
 }
 
 // Addr returns the listener's address (useful when listening on :0).
 func (d *Daemon) Addr() net.Addr {
 	return d.listener.Addr()
+}
+
+// Fingerprint returns the TLS certificate fingerprint.
+func (d *Daemon) Fingerprint() string {
+	return d.fingerprint
 }
 
 // Serve accepts connections until ctx is cancelled. Blocks until shutdown completes.
@@ -125,6 +154,7 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	return nil
 }
 
+//nolint:revive // cognitive-complexity: auth + fork/in-process dispatch
 func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
@@ -133,20 +163,8 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 
 	mux := NewMux(conn)
 
-	// Open control stream before Run so the reader doesn't discard handshake frames.
+	// Open control stream before Run so the reader doesn't discard auth frames.
 	controlCh := mux.OpenStream(ControlStream)
-
-	// Create handler backed by local endpoints rooted at daemon root.
-	handler := NewHandler(d.readEP, d.writeEP, mux)
-
-	// Set handler for dynamically created streams. When a client sends a
-	// frame on a new stream ID, the mux auto-creates the stream and calls
-	// this handler in a new goroutine. The handler processes the single
-	// request-response exchange and the stream is cleaned up by ServeStream.
-	mux.SetHandler(func(streamID uint32, ch <-chan Frame) {
-		handler.ServeStream(streamID, ch)
-		mux.CloseStream(streamID)
-	})
 
 	var muxWg sync.WaitGroup
 	muxWg.Add(1)
@@ -155,15 +173,73 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 		mux.Run() //nolint:errcheck // mux.Run error propagated via mux closure and conn.Close
 	}()
 
-	// Wait for handshake on control stream.
-	if !d.handleHandshake(mux, controlCh) {
-		slog.Warn("handshake failed", "remote", remoteAddr)
+	// Authenticate via SSH pubkey challenge/response.
+	username, err := d.auth.Authenticate(mux, controlCh)
+	if err != nil {
+		slog.Warn("authentication failed", "remote", remoteAddr, "error", err)
 		mux.Close()
 		muxWg.Wait()
 		return
 	}
 
-	slog.Info("authenticated", "remote", remoteAddr)
+	slog.Info("authenticated", "remote", remoteAddr, "username", username)
+
+	if d.cfg.ForkMode {
+		// Fork a child process running as the authenticated user.
+		d.handleFork(conn, username, mux, &muxWg)
+		return
+	}
+
+	// In-process mode (tests, single-user): run handler directly.
+	d.handleInProcess(ctx, mux, &muxWg, remoteAddr)
+}
+
+func (d *Daemon) handleFork(conn net.Conn, username string, mux *Mux, muxWg *sync.WaitGroup) {
+	// Look up OS user for credential info.
+	u, err := user.Lookup(username)
+	if err != nil {
+		slog.Error("user lookup for fork", "username", username, "error", err)
+		mux.Close()
+		muxWg.Wait()
+		return
+	}
+
+	uid, _ := strconv.ParseUint(u.Uid, 10, 32) //nolint:errcheck // validated by user.Lookup
+	gid, _ := strconv.ParseUint(u.Gid, 10, 32) //nolint:errcheck // validated by user.Lookup
+
+	groupIDs, _ := u.GroupIds() //nolint:errcheck // best-effort
+	groups := make([]uint32, 0, len(groupIDs))
+	for _, gidStr := range groupIDs {
+		g, parseErr := strconv.ParseUint(gidStr, 10, 32)
+		if parseErr == nil {
+			groups = append(groups, uint32(g)) //nolint:gosec // G115: bounded by ParseUint
+		}
+	}
+
+	// Close the mux in the parent — the child will create its own.
+	mux.Close()
+	muxWg.Wait()
+
+	if forkErr := ForkWorker(
+		conn,
+		uint32(uid), //nolint:gosec // G115: bounded by ParseUint
+		uint32(gid), //nolint:gosec // G115: bounded by ParseUint
+		groups,
+		d.cfg.Root,
+	); forkErr != nil {
+		slog.Error("fork worker failed", "username", username, "error", forkErr)
+	}
+}
+
+func (d *Daemon) handleInProcess(
+	ctx context.Context, mux *Mux, muxWg *sync.WaitGroup, remoteAddr string,
+) {
+	handler := NewHandler(d.readEP, d.writeEP, mux)
+
+	mux.SetHandler(func(streamID uint32, ch <-chan Frame) {
+		handler.ServeStream(streamID, ch)
+		mux.CloseStream(streamID)
+	})
 
 	// Wait for mux to finish (connection closed).
 	select {
@@ -174,53 +250,4 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	muxWg.Wait()
 
 	slog.Info("connection closed", "remote", remoteAddr)
-}
-
-func (d *Daemon) handleHandshake(mux *Mux, ch <-chan Frame) bool {
-	// Wait for HandshakeReq with 10s timeout.
-	timer := time.NewTimer(10 * time.Second)
-	defer timer.Stop()
-
-	var f Frame
-	select {
-	case f = <-ch:
-	case <-timer.C:
-		return false
-	}
-
-	if f.MsgType != MsgHandshakeReq {
-		return false
-	}
-
-	var req HandshakeReq
-	if _, err := req.UnmarshalMsg(f.Payload); err != nil {
-		return false
-	}
-
-	// Validate auth token.
-	if req.AuthToken != d.cfg.AuthToken {
-		resp := ErrorResp{Message: "authentication failed"}
-		payload, _ := resp.MarshalMsg(nil) //nolint:errcheck // best-effort error response
-		_ = mux.Send(                      //nolint:errcheck // best-effort error response
-			Frame{StreamID: ControlStream, MsgType: MsgErrorResp, Payload: payload},
-		)
-		return false
-	}
-
-	// Send HandshakeResp.
-	resp := HandshakeResp{
-		Version: ProtocolVersion,
-		Root:    d.cfg.Root,
-	}
-	payload, err := resp.MarshalMsg(nil)
-	if err != nil {
-		return false
-	}
-	if err := mux.Send(
-		Frame{StreamID: ControlStream, MsgType: MsgHandshakeResp, Payload: payload},
-	); err != nil {
-		return false
-	}
-
-	return true
 }

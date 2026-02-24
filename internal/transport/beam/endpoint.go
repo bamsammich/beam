@@ -67,12 +67,13 @@ func clientPath(prefix, serverRelPath string) string {
 // DefaultPort is the default beam daemon port.
 const DefaultPort = 9876
 
-// DialBeam connects to a beam daemon over TLS, performs protocol handshake.
+// DialBeam connects to a beam daemon over TLS, performs SSH pubkey auth.
 // Returns a running mux, the server root, and capabilities.
 //
 //nolint:revive // function-result-limit: established API returning (mux, root, caps, err)
 func DialBeam(
-	addr, token string,
+	addr string,
+	authOpts proto.AuthOpts,
 	tlsConfig *tls.Config,
 ) (*proto.Mux, string, transport.Capabilities, error) {
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", addr, tlsConfig)
@@ -80,105 +81,46 @@ func DialBeam(
 		return nil, "", transport.Capabilities{}, fmt.Errorf("dial %s: %w", addr, err)
 	}
 
-	return DialBeamConn(conn, token)
+	// Verify TLS fingerprint if provided.
+	if authOpts.Fingerprint != "" {
+		if fpErr := proto.VerifyFingerprint(conn, authOpts.Fingerprint); fpErr != nil {
+			conn.Close()
+			return nil, "", transport.Capabilities{}, fpErr
+		}
+	}
+
+	return DialBeamConn(conn, authOpts)
 }
 
-// DialBeamConn performs the beam protocol handshake over an already-established
-// connection. This is the core handshake logic shared by DialBeam (direct TLS)
+// DialBeamConn performs beam SSH pubkey auth over an already-established
+// connection. This is the core auth logic shared by DialBeam (direct TLS)
 // and DialBeamTunnel (SSH-tunneled TLS). Returns a running mux, the server
 // root, and capabilities.
 //
-//nolint:revive // cyclomatic: handshake + response parsing — irreducible
+//nolint:revive // function-result-limit: matches DialBeam signature
 func DialBeamConn(
-	conn net.Conn, token string,
+	conn net.Conn, authOpts proto.AuthOpts,
 ) (*proto.Mux, string, transport.Capabilities, error) {
 	mux := proto.NewMux(conn)
 
 	// Start mux in background.
 	go mux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
 
-	// Open control stream for handshake.
-	controlCh := mux.OpenStream(proto.ControlStream)
-
-	req := proto.HandshakeReq{
-		Version:   proto.ProtocolVersion,
-		AuthToken: token,
-	}
-	payload, err := req.MarshalMsg(nil)
+	// Perform SSH pubkey authentication.
+	root, err := proto.ClientAuth(mux, authOpts)
 	if err != nil {
 		mux.Close()
-		return nil, "", transport.Capabilities{}, fmt.Errorf("marshal handshake: %w", err)
+		return nil, "", transport.Capabilities{}, fmt.Errorf("auth: %w", err)
 	}
 
-	if err := mux.Send(proto.Frame{
-		StreamID: proto.ControlStream,
-		MsgType:  proto.MsgHandshakeReq,
-		Payload:  payload,
-	}); err != nil {
+	// Query capabilities.
+	caps, err := queryCaps(mux)
+	if err != nil {
 		mux.Close()
-		return nil, "", transport.Capabilities{}, fmt.Errorf("send handshake: %w", err)
+		return nil, "", transport.Capabilities{}, fmt.Errorf("query capabilities: %w", err)
 	}
 
-	// Wait for response.
-	timer := time.NewTimer(10 * time.Second)
-	defer timer.Stop()
-
-	select {
-	case f, ok := <-controlCh:
-		if !ok {
-			mux.Close()
-			return nil, "", transport.Capabilities{}, errors.New(
-				"connection closed during handshake",
-			)
-		}
-		if f.MsgType == proto.MsgErrorResp {
-			var errResp proto.ErrorResp
-			errResp.UnmarshalMsg(f.Payload) //nolint:errcheck // best effort
-			mux.Close()
-			return nil, "", transport.Capabilities{}, fmt.Errorf(
-				"handshake rejected: %s",
-				errResp.Message,
-			)
-		}
-		if f.MsgType == 0 && len(f.Payload) == 0 {
-			// Zero-value frame from closed channel.
-			mux.Close()
-			return nil, "", transport.Capabilities{}, errors.New(
-				"connection closed during handshake (auth rejected)",
-			)
-		}
-		if f.MsgType != proto.MsgHandshakeResp {
-			mux.Close()
-			return nil, "", transport.Capabilities{}, fmt.Errorf(
-				"unexpected message type 0x%02x during handshake",
-				f.MsgType,
-			)
-		}
-
-		var resp proto.HandshakeResp
-		if _, err := resp.UnmarshalMsg(f.Payload); err != nil {
-			mux.Close()
-			return nil, "", transport.Capabilities{}, fmt.Errorf(
-				"decode handshake response: %w",
-				err,
-			)
-		}
-
-		mux.CloseStream(proto.ControlStream)
-
-		// Query capabilities.
-		caps, err := queryCaps(mux)
-		if err != nil {
-			mux.Close()
-			return nil, "", transport.Capabilities{}, fmt.Errorf("query capabilities: %w", err)
-		}
-
-		return mux, resp.Root, caps, nil
-
-	case <-timer.C:
-		mux.Close()
-		return nil, "", transport.Capabilities{}, errors.New("handshake timeout")
-	}
+	return mux, root, caps, nil
 }
 
 func queryCaps(mux *proto.Mux) (transport.Capabilities, error) {
@@ -602,7 +544,7 @@ func (e *Writer) MkdirAll(relPath string, perm os.FileMode) error {
 	return e.expectAck(ch)
 }
 
-//nolint:ireturn // implements ReadWriter interface
+//nolint:ireturn // implements transport.ReadWriter interface; WriteFile is the standard return type
 func (e *Writer) CreateTemp(
 	relPath string,
 	perm os.FileMode,

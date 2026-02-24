@@ -196,6 +196,99 @@ func TestUnknownFieldsIgnored(t *testing.T) {
 	assert.Equal(t, "mytoken", decoded.AuthToken)
 }
 
+func TestAuthReqRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	orig := proto.AuthReq{
+		Username:   "alice",
+		Pubkey:     []byte{0x00, 0x01, 0x02, 0x03},
+		PubkeyType: "ssh-ed25519",
+	}
+
+	data, err := orig.MarshalMsg(nil)
+	require.NoError(t, err)
+
+	var decoded proto.AuthReq
+	_, err = decoded.UnmarshalMsg(data)
+	require.NoError(t, err)
+
+	assert.Equal(t, orig, decoded)
+}
+
+func TestAuthChallengeRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	nonce := make([]byte, 32)
+	for i := range nonce {
+		nonce[i] = byte(i)
+	}
+	orig := proto.AuthChallenge{Nonce: nonce}
+
+	data, err := orig.MarshalMsg(nil)
+	require.NoError(t, err)
+
+	var decoded proto.AuthChallenge
+	_, err = decoded.UnmarshalMsg(data)
+	require.NoError(t, err)
+
+	assert.Equal(t, orig, decoded)
+}
+
+func TestAuthResponseRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	orig := proto.AuthResponse{
+		Signature: []byte{0xDE, 0xAD, 0xBE, 0xEF},
+	}
+
+	data, err := orig.MarshalMsg(nil)
+	require.NoError(t, err)
+
+	var decoded proto.AuthResponse
+	_, err = decoded.UnmarshalMsg(data)
+	require.NoError(t, err)
+
+	assert.Equal(t, orig, decoded)
+}
+
+func TestAuthResultRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	orig := proto.AuthResult{
+		OK:      true,
+		Root:    "/var/beam",
+		Message: "",
+	}
+
+	data, err := orig.MarshalMsg(nil)
+	require.NoError(t, err)
+
+	var decoded proto.AuthResult
+	_, err = decoded.UnmarshalMsg(data)
+	require.NoError(t, err)
+
+	assert.Equal(t, orig, decoded)
+}
+
+func TestAuthResultFailureRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	orig := proto.AuthResult{
+		OK:      false,
+		Root:    "",
+		Message: "public key not authorized",
+	}
+
+	data, err := orig.MarshalMsg(nil)
+	require.NoError(t, err)
+
+	var decoded proto.AuthResult
+	_, err = decoded.UnmarshalMsg(data)
+	require.NoError(t, err)
+
+	assert.Equal(t, orig, decoded)
+}
+
 func TestSetMetadataReqRoundTrip(t *testing.T) {
 	t.Parallel()
 
