@@ -15,8 +15,8 @@ import (
 type VerifyConfig struct {
 	Events      chan<- event.Event
 	Stats       stats.Writer
-	SrcEndpoint transport.ReadEndpoint
-	DstEndpoint transport.WriteEndpoint
+	SrcEndpoint transport.Reader
+	DstEndpoint transport.ReadWriter
 	Filter      *filter.Chain
 	SrcRoot     string
 	DstRoot     string

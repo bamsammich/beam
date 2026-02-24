@@ -68,9 +68,9 @@ func DialBeamTunnel(
 }
 
 // TryBeamSSHRead attempts to discover a beam daemon on the remote host and
-// connect via SSH tunnel. Returns a ReadEndpoint if successful, or an error
+// connect via SSH tunnel. Returns a Reader if successful, or an error
 // if no daemon is found or connection fails.
-func TryBeamSSHRead(sshClient *ssh.Client, path string) (*ReadEndpoint, error) {
+func TryBeamSSHRead(sshClient *ssh.Client, path string) (*Reader, error) {
 	discovery, err := ReadRemoteDaemonDiscovery(sshClient)
 	if err != nil {
 		return nil, err
@@ -81,13 +81,13 @@ func TryBeamSSHRead(sshClient *ssh.Client, path string) (*ReadEndpoint, error) {
 		return nil, err
 	}
 
-	return NewReadEndpoint(mux, path, root, caps), nil
+	return NewReader(mux, path, root, caps), nil
 }
 
 // TryBeamSSHWrite attempts to discover a beam daemon on the remote host and
-// connect via SSH tunnel. Returns a WriteEndpoint if successful, or an error
+// connect via SSH tunnel. Returns a Writer if successful, or an error
 // if no daemon is found or connection fails.
-func TryBeamSSHWrite(sshClient *ssh.Client, path string) (*WriteEndpoint, error) {
+func TryBeamSSHWrite(sshClient *ssh.Client, path string) (*Writer, error) {
 	discovery, err := ReadRemoteDaemonDiscovery(sshClient)
 	if err != nil {
 		return nil, err
@@ -98,5 +98,5 @@ func TryBeamSSHWrite(sshClient *ssh.Client, path string) (*WriteEndpoint, error)
 		return nil, err
 	}
 
-	return NewWriteEndpoint(mux, path, root, caps), nil
+	return NewWriter(mux, path, root, caps), nil
 }

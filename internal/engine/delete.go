@@ -15,8 +15,8 @@ import (
 // DeleteConfig controls the delete pass.
 type DeleteConfig struct {
 	Events      chan<- event.Event
-	SrcEndpoint transport.ReadEndpoint
-	DstEndpoint transport.WriteEndpoint
+	SrcEndpoint transport.Reader
+	DstEndpoint transport.ReadWriter
 	Filter      *filter.Chain
 	SrcRoot     string
 	DstRoot     string

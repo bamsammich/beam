@@ -39,8 +39,8 @@ func TestVerify_MatchingFiles(t *testing.T) {
 		Workers:     2,
 		Stats:       collector,
 		Events:      events,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	})
 	close(events)
 
@@ -70,8 +70,8 @@ func TestVerify_CorruptedFile(t *testing.T) {
 		Workers:     1,
 		Stats:       collector,
 		Events:      events,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	})
 	close(events)
 
@@ -112,8 +112,8 @@ func TestVerify_FilterRespected(t *testing.T) {
 		Filter:      chain,
 		Stats:       collector,
 		Events:      events,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	})
 	close(events)
 
@@ -152,8 +152,8 @@ func TestVerify_Events(t *testing.T) {
 		Workers:     1,
 		Stats:       collector,
 		Events:      events,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	})
 	close(events)
 	<-done
@@ -176,12 +176,15 @@ func TestEngine_CopyWithVerify(t *testing.T) {
 	require.NoError(t, os.MkdirAll(src, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(src, "file.txt"), []byte("data"), 0644))
 
+	srcConn, dstConn := localConns()
 	result := Run(context.Background(), Config{
-		Sources:   []string{src},
-		Dst:       dst,
-		Recursive: true,
-		Workers:   2,
-		Verify:    true,
+		Sources:      []string{src},
+		Dst:          dst,
+		Recursive:    true,
+		Workers:      2,
+		Verify:       true,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -197,13 +200,16 @@ func TestEngine_VerifySkippedOnDryRun(t *testing.T) {
 	require.NoError(t, os.MkdirAll(src, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(src, "file.txt"), []byte("data"), 0644))
 
+	srcConn2, dstConn2 := localConns()
 	result := Run(context.Background(), Config{
-		Sources:   []string{src},
-		Dst:       dst,
-		Recursive: true,
-		Workers:   1,
-		Verify:    true,
-		DryRun:    true,
+		Sources:      []string{src},
+		Dst:          dst,
+		Recursive:    true,
+		Workers:      1,
+		Verify:       true,
+		DryRun:       true,
+		SrcTransport: srcConn2,
+		DstTransport: dstConn2,
 	})
 
 	require.NoError(t, result.Err)

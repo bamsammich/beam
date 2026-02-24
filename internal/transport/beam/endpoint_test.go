@@ -40,7 +40,7 @@ func startTestDaemon(t *testing.T, root string) (addr, token string) {
 func dialTestEndpoints(
 	t *testing.T,
 	root string,
-) (*beam.ReadEndpoint, *beam.WriteEndpoint) {
+) (*beam.Reader, *beam.Writer) {
 	t.Helper()
 
 	addr, token := startTestDaemon(t, root)
@@ -49,12 +49,12 @@ func dialTestEndpoints(
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 
-	readEP := beam.NewReadEndpoint(mux, root, root, caps)
-	writeEP := beam.NewWriteEndpoint(mux, root, root, caps)
+	readEP := beam.NewReader(mux, root, root, caps)
+	writeEP := beam.NewWriter(mux, root, root, caps)
 	return readEP, writeEP
 }
 
-func TestBeamReadEndpointStat(t *testing.T) {
+func TestBeamReaderStat(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -69,7 +69,7 @@ func TestBeamReadEndpointStat(t *testing.T) {
 	assert.False(t, entry.IsDir)
 }
 
-func TestBeamReadEndpointWalk(t *testing.T) {
+func TestBeamReaderWalk(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -91,7 +91,7 @@ func TestBeamReadEndpointWalk(t *testing.T) {
 	assert.Contains(t, paths, filepath.Join("sub", "b.txt"))
 }
 
-func TestBeamReadEndpointReadDir(t *testing.T) {
+func TestBeamReaderReadDir(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -114,7 +114,7 @@ func TestBeamReadEndpointReadDir(t *testing.T) {
 	assert.Contains(t, names, "sub")
 }
 
-func TestBeamReadEndpointOpenRead(t *testing.T) {
+func TestBeamReaderOpenRead(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -132,7 +132,7 @@ func TestBeamReadEndpointOpenRead(t *testing.T) {
 	assert.Equal(t, content, got)
 }
 
-func TestBeamReadEndpointHash(t *testing.T) {
+func TestBeamReaderHash(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -145,7 +145,7 @@ func TestBeamReadEndpointHash(t *testing.T) {
 	assert.Len(t, hash, 64) // BLAKE3 hex
 }
 
-func TestBeamWriteEndpointMkdirAll(t *testing.T) {
+func TestBeamWriterMkdirAll(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -158,7 +158,7 @@ func TestBeamWriteEndpointMkdirAll(t *testing.T) {
 	assert.True(t, info.IsDir())
 }
 
-func TestBeamWriteEndpointCreateTempWriteRename(t *testing.T) {
+func TestBeamWriterCreateTempWriteRename(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -178,7 +178,7 @@ func TestBeamWriteEndpointCreateTempWriteRename(t *testing.T) {
 	assert.Equal(t, "beam protocol data", string(content))
 }
 
-func TestBeamWriteEndpointRemove(t *testing.T) {
+func TestBeamWriterRemove(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -192,7 +192,7 @@ func TestBeamWriteEndpointRemove(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 }
 
-func TestBeamWriteEndpointSymlink(t *testing.T) {
+func TestBeamWriterSymlink(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -207,7 +207,7 @@ func TestBeamWriteEndpointSymlink(t *testing.T) {
 	assert.Equal(t, "target.txt", linkTarget)
 }
 
-func TestBeamWriteEndpointLink(t *testing.T) {
+func TestBeamWriterLink(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -222,7 +222,7 @@ func TestBeamWriteEndpointLink(t *testing.T) {
 	assert.Equal(t, "data", string(content))
 }
 
-func TestBeamWriteEndpointSetMetadata(t *testing.T) {
+func TestBeamWriterSetMetadata(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -272,7 +272,7 @@ func makeUniqueContent(size int) []byte {
 	return data
 }
 
-func TestBeamReadEndpointComputeSignature(t *testing.T) {
+func TestBeamReaderComputeSignature(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -287,7 +287,7 @@ func TestBeamReadEndpointComputeSignature(t *testing.T) {
 	assert.NotEmpty(t, sig.Blocks)
 }
 
-func TestBeamReadEndpointMatchBlocks(t *testing.T) {
+func TestBeamReaderMatchBlocks(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -320,7 +320,7 @@ func TestBeamReadEndpointMatchBlocks(t *testing.T) {
 	assert.True(t, hasLiteral)
 }
 
-func TestBeamWriteEndpointComputeSignature(t *testing.T) {
+func TestBeamWriterComputeSignature(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
@@ -335,7 +335,7 @@ func TestBeamWriteEndpointComputeSignature(t *testing.T) {
 	assert.NotEmpty(t, sig.Blocks)
 }
 
-func TestBeamWriteEndpointApplyDelta(t *testing.T) {
+func TestBeamWriterApplyDelta(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()

@@ -27,8 +27,8 @@ func TestScanner_FlatDir(t *testing.T) {
 		SrcRoot:     src,
 		DstRoot:     dst,
 		Workers:     2,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -80,8 +80,8 @@ func TestScanner_NestedDirs(t *testing.T) {
 		SrcRoot:     src,
 		DstRoot:     dst,
 		Workers:     2,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -153,8 +153,8 @@ func TestScanner_Symlink(t *testing.T) {
 		SrcRoot:     src,
 		DstRoot:     dst,
 		Workers:     1,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -204,8 +204,8 @@ func TestScanner_Hardlink(t *testing.T) {
 		SrcRoot:     src,
 		DstRoot:     dst,
 		Workers:     1,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -257,8 +257,8 @@ func TestScanner_LargeFileChunking(t *testing.T) {
 		DstRoot:        dst,
 		Workers:        1,
 		ChunkThreshold: 4 * 1024 * 1024, // 4 MiB
-		SrcEndpoint:    transport.NewLocalReadEndpoint(src),
-		DstEndpoint:    transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint:    transport.NewLocalReader(src),
+		DstEndpoint:    transport.NewLocalWriter(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -313,8 +313,8 @@ func TestScanner_SparseDetection(t *testing.T) {
 		DstRoot:      dst,
 		Workers:      1,
 		SparseDetect: true,
-		SrcEndpoint:  transport.NewLocalReadEndpoint(src),
-		DstEndpoint:  transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint:  transport.NewLocalReader(src),
+		DstEndpoint:  transport.NewLocalWriter(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -360,8 +360,8 @@ func TestScanner_ContextCancel(t *testing.T) {
 		SrcRoot:     src,
 		DstRoot:     dst,
 		Workers:     2,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -402,8 +402,8 @@ func TestScanner_PermissionDenied(t *testing.T) {
 		SrcRoot:     src,
 		DstRoot:     dst,
 		Workers:     1,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -447,8 +447,8 @@ func TestScanner_ExcludeFilter(t *testing.T) {
 		DstRoot:     dst,
 		Workers:     1,
 		Filter:      chain,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -495,8 +495,8 @@ func TestScanner_DirExcludeSkipsRecursion(t *testing.T) {
 		DstRoot:     dst,
 		Workers:     1,
 		Filter:      chain,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	}
 
 	scanner := NewScanner(cfg)
@@ -538,8 +538,8 @@ func TestScanner_IncludeOverride(t *testing.T) {
 		DstRoot:     dst,
 		Workers:     1,
 		Filter:      chain,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	}
 
 	scanner := NewScanner(cfg)

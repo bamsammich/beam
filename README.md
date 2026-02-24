@@ -86,39 +86,57 @@ Measured with [hyperfine](https://github.com/sharkdp/hyperfine) (3 runs, 1 warmu
 
 | Command | Mean | Relative |
 |:--------|-----:|---------:|
-| **`beam`** | **444 ms** | **1.00x** |
-| `rsync` | 955 ms | 2.15x slower |
+| **`beam`** | **391 ms** | **1.00x** |
+| `rsync` | 907 ms | 2.32x slower |
 
 **10,000 x 4 KB files:**
 
 | Command | Mean | Relative |
 |:--------|-----:|---------:|
-| **`beam -r`** | **203 ms** | **1.00x** |
-| `rsync -a` | 257 ms | 1.27x slower |
+| **`beam -r`** | **199 ms** | **1.00x** |
+| `rsync -a` | 264 ms | 1.33x slower |
 
-beam is **2.1x faster than rsync** on large files and **1.27x faster** on many small files for local transfers.
+beam is **2.3x faster than rsync** on large files and **1.3x faster** on many small files for local transfers.
 
-### Network transfers (beam protocol vs rsync over SSH)
+### Network transfers — beam:// direct (beam protocol vs rsync over SSH)
 
-Measured with [hyperfine](https://github.com/sharkdp/hyperfine) (3 runs, 1 warmup) over a 1 Gbps Ethernet link.
+Measured with [hyperfine](https://github.com/sharkdp/hyperfine) (3 runs, 1 warmup) over a real network to a remote host running a beam daemon.
 
 **1 GB file:**
 
 | Command | Mean | Relative |
 |:--------|-----:|---------:|
-| **`beam` (beam://)** | **4.81 s** | **1.00x** |
-| `rsync` (SSH) | 17.32 s | 3.60x slower |
+| **`beam` (beam://)** | **30.7 s** | **1.00x** |
+| `rsync` (SSH) | 32.7 s | 1.06x slower |
 
 **10,000 x 4 KB files:**
 
 | Command | Mean | Relative |
 |:--------|-----:|---------:|
-| **`beam -r` (beam://)** | **1.14 s** | **1.00x** |
-| `rsync -r` (SSH) | 1.50 s | 1.32x slower |
+| **`beam -r` (beam://)** | **1.46 s** | **1.00x** |
+| `rsync -a` (SSH) | 2.19 s | 1.50x slower |
 
-beam's custom protocol is **3.6x faster than rsync** for large file transfers thanks to TLS stream multiplexing and zero-overhead framing, and **1.3x faster** for many small files thanks to batch RPCs and a pre-built destination index that eliminates per-file round-trips.
+### Network transfers — beam-over-SSH (auto-detected daemon vs rsync)
 
-> Run your own benchmarks: `beam --benchmark /src /dst` auto-measures throughput and tunes worker count.
+When connecting via SSH, beam auto-detects a running daemon on the remote host and transparently upgrades to the beam protocol through an SSH tunnel.
+
+**1 GB file:**
+
+| Command | Mean | Relative |
+|:--------|-----:|---------:|
+| `rsync` (SSH) | **34.5 s** | **1.00x** |
+| `beam` (SSH+beam) | 42.2 s | 1.22x slower |
+
+**10,000 x 4 KB files:**
+
+| Command | Mean | Relative |
+|:--------|-----:|---------:|
+| **`beam -r` (SSH+beam)** | **1.86 s** | **1.00x** |
+| `rsync -a` (SSH) | 2.17 s | 1.16x slower |
+
+For large file transfers, beam:// direct is **on par with rsync** (network bandwidth is the bottleneck, not protocol overhead). For **many small files**, beam is **1.5x faster** thanks to batch RPCs that reduce per-file round-trips from 5 to 1/N. Beam-over-SSH adds tunnel overhead that makes large files slower, but still wins on small files where round-trip latency dominates.
+
+> Run your own benchmarks: `make benchmark` or `scripts/benchmark.sh --help`
 
 ## How It Works
 

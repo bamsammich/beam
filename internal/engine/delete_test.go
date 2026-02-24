@@ -33,8 +33,8 @@ func TestDeleteExtraneous_OverlappingTrees(t *testing.T) {
 	deleted, err := DeleteExtraneous(context.Background(), DeleteConfig{
 		SrcRoot:     src,
 		DstRoot:     dst,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	})
 
 	require.NoError(t, err)
@@ -65,8 +65,8 @@ func TestDeleteExtraneous_NonOverlapping(t *testing.T) {
 	deleted, err := DeleteExtraneous(context.Background(), DeleteConfig{
 		SrcRoot:     src,
 		DstRoot:     dst,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	})
 
 	require.NoError(t, err)
@@ -89,8 +89,8 @@ func TestDeleteExtraneous_DryRun(t *testing.T) {
 		SrcRoot:     src,
 		DstRoot:     dst,
 		DryRun:      true,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	})
 
 	require.NoError(t, err)
@@ -122,8 +122,8 @@ func TestDeleteExtraneous_FilterInteraction(t *testing.T) {
 		SrcRoot:     src,
 		DstRoot:     dst,
 		Filter:      chain,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	})
 
 	require.NoError(t, err)
@@ -155,8 +155,8 @@ func TestDeleteExtraneous_NestedEmptyDirs(t *testing.T) {
 	deleted, err := DeleteExtraneous(context.Background(), DeleteConfig{
 		SrcRoot:     src,
 		DstRoot:     dst,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	})
 
 	require.NoError(t, err)
@@ -182,8 +182,8 @@ func TestDeleteExtraneous_EmitsEvents(t *testing.T) {
 		SrcRoot:     src,
 		DstRoot:     dst,
 		Events:      events,
-		SrcEndpoint: transport.NewLocalReadEndpoint(src),
-		DstEndpoint: transport.NewLocalWriteEndpoint(dst),
+		SrcEndpoint: transport.NewLocalReader(src),
+		DstEndpoint: transport.NewLocalWriter(dst),
 	})
 
 	require.NoError(t, err)

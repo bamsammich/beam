@@ -1,4 +1,4 @@
-// Package beam implements ReadEndpoint and WriteEndpoint over the beam binary protocol.
+// Package beam implements Reader and Writer over the beam binary protocol.
 package beam
 
 import (
@@ -221,8 +221,8 @@ func decodeError(payload []byte) error {
 	return errors.New(errResp.Message)
 }
 
-// ReadEndpoint implements transport.ReadEndpoint over the beam protocol.
-type ReadEndpoint struct {
+// Reader implements transport.Reader over the beam protocol.
+type Reader struct {
 	mux        *proto.Mux
 	root       string // client-side root (loc.Path)
 	pathPrefix string // prefix to prepend to relPaths for server resolution
@@ -230,34 +230,37 @@ type ReadEndpoint struct {
 	nextStream atomic.Uint32
 }
 
-// Compile-time interface check.
-var _ transport.ReadEndpoint = (*ReadEndpoint)(nil)
+// Compile-time interface checks.
+var (
+	_ transport.Reader      = (*Reader)(nil)
+	_ transport.DeltaSource = (*Reader)(nil)
+)
 
-// NewReadEndpoint creates a read endpoint from an established mux connection.
+// NewReader creates a read endpoint from an established mux connection.
 // root is the client's target path (loc.Path), daemonRoot is the server's root.
 // All relPaths sent to the server are prefixed with the path from daemonRoot to root.
-func NewReadEndpoint(
+func NewReader(
 	mux *proto.Mux,
 	root, daemonRoot string,
 	caps transport.Capabilities,
-) *ReadEndpoint {
+) *Reader {
 	prefix := computePathPrefix(root, daemonRoot)
-	ep := &ReadEndpoint{mux: mux, root: root, pathPrefix: prefix, caps: caps}
+	ep := &Reader{mux: mux, root: root, pathPrefix: prefix, caps: caps}
 	ep.nextStream.Store(2) // 1 was used for caps query
 	return ep
 }
 
-func (e *ReadEndpoint) allocStream() uint32 {
+func (e *Reader) allocStream() uint32 {
 	return e.nextStream.Add(1)
 }
 
-func (e *ReadEndpoint) Walk(fn func(entry transport.FileEntry) error) error {
+func (e *Reader) Walk(fn func(entry transport.FileEntry) error) error {
 	return e.walkRel("", fn)
 }
 
 // walkRel walks a subtree starting at walkRoot (relative to endpoint root).
 // An empty walkRoot walks the entire endpoint root.
-func (e *ReadEndpoint) walkRel(walkRoot string, fn func(entry transport.FileEntry) error) error {
+func (e *Reader) walkRel(walkRoot string, fn func(entry transport.FileEntry) error) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -295,7 +298,7 @@ func (e *ReadEndpoint) walkRel(walkRoot string, fn func(entry transport.FileEntr
 	return errors.New("stream closed during walk")
 }
 
-func (e *ReadEndpoint) Stat(relPath string) (transport.FileEntry, error) {
+func (e *Reader) Stat(relPath string) (transport.FileEntry, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -328,7 +331,7 @@ func (e *ReadEndpoint) Stat(relPath string) (transport.FileEntry, error) {
 	return entry, nil
 }
 
-func (e *ReadEndpoint) ReadDir(relPath string) ([]transport.FileEntry, error) {
+func (e *Reader) ReadDir(relPath string) ([]transport.FileEntry, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -364,7 +367,7 @@ func (e *ReadEndpoint) ReadDir(relPath string) ([]transport.FileEntry, error) {
 	return entries, nil
 }
 
-func (e *ReadEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
+func (e *Reader) OpenRead(relPath string) (io.ReadCloser, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 
@@ -384,7 +387,7 @@ func (e *ReadEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
 	return &beamReader{mux: e.mux, streamID: streamID, ch: ch}, nil
 }
 
-func (e *ReadEndpoint) Hash(relPath string) (string, error) {
+func (e *Reader) Hash(relPath string) (string, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -416,7 +419,7 @@ func (e *ReadEndpoint) Hash(relPath string) (string, error) {
 }
 
 // ComputeSignature asks the remote daemon to compute block signatures of a file.
-func (e *ReadEndpoint) ComputeSignature(
+func (e *Reader) ComputeSignature(
 	relPath string,
 	fileSize int64,
 ) (transport.Signature, error) {
@@ -450,7 +453,7 @@ func (e *ReadEndpoint) ComputeSignature(
 }
 
 // MatchBlocks asks the remote daemon to match its file against provided signatures.
-func (e *ReadEndpoint) MatchBlocks(
+func (e *Reader) MatchBlocks(
 	relPath string,
 	sig transport.Signature,
 ) ([]transport.DeltaOp, error) {
@@ -488,9 +491,9 @@ func (e *ReadEndpoint) MatchBlocks(
 	return proto.ToDeltaOps(resp.Ops), nil
 }
 
-func (e *ReadEndpoint) Root() string                 { return e.root }
-func (e *ReadEndpoint) Caps() transport.Capabilities { return e.caps }
-func (e *ReadEndpoint) Close() error                 { return e.mux.Close() }
+func (e *Reader) Root() string                 { return e.root }
+func (e *Reader) Caps() transport.Capabilities { return e.caps }
+func (e *Reader) Close() error                 { return e.mux.Close() }
 
 // beamReader implements io.ReadCloser by reading streamed data from the protocol.
 type beamReader struct {
@@ -546,8 +549,8 @@ func (r *beamReader) Close() error {
 	return nil
 }
 
-// WriteEndpoint implements transport.WriteEndpoint over the beam protocol.
-type WriteEndpoint struct {
+// Writer implements transport.ReadWriter over the beam protocol.
+type Writer struct {
 	mux        *proto.Mux
 	root       string // client-side root (loc.Path)
 	pathPrefix string // prefix to prepend to relPaths for server resolution
@@ -555,27 +558,32 @@ type WriteEndpoint struct {
 	nextStream atomic.Uint32
 }
 
-// Compile-time interface check.
-var _ transport.WriteEndpoint = (*WriteEndpoint)(nil)
+// Compile-time interface checks.
+var (
+	_ transport.ReadWriter    = (*Writer)(nil)
+	_ transport.BatchWriter   = (*Writer)(nil)
+	_ transport.DeltaTarget   = (*Writer)(nil)
+	_ transport.SubtreeWalker = (*Writer)(nil)
+)
 
-// NewWriteEndpoint creates a write endpoint from an established mux connection.
+// NewWriter creates a write endpoint from an established mux connection.
 // root is the client's target path (loc.Path), daemonRoot is the server's root.
-func NewWriteEndpoint(
+func NewWriter(
 	mux *proto.Mux,
 	root, daemonRoot string,
 	caps transport.Capabilities,
-) *WriteEndpoint {
+) *Writer {
 	prefix := computePathPrefix(root, daemonRoot)
-	ep := &WriteEndpoint{mux: mux, root: root, pathPrefix: prefix, caps: caps}
+	ep := &Writer{mux: mux, root: root, pathPrefix: prefix, caps: caps}
 	ep.nextStream.Store(2)
 	return ep
 }
 
-func (e *WriteEndpoint) allocStream() uint32 {
+func (e *Writer) allocStream() uint32 {
 	return e.nextStream.Add(1)
 }
 
-func (e *WriteEndpoint) MkdirAll(relPath string, perm os.FileMode) error {
+func (e *Writer) MkdirAll(relPath string, perm os.FileMode) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -594,8 +602,8 @@ func (e *WriteEndpoint) MkdirAll(relPath string, perm os.FileMode) error {
 	return e.expectAck(ch)
 }
 
-//nolint:ireturn // implements WriteEndpoint interface
-func (e *WriteEndpoint) CreateTemp(
+//nolint:ireturn // implements ReadWriter interface
+func (e *Writer) CreateTemp(
 	relPath string,
 	perm os.FileMode,
 ) (transport.WriteFile, error) {
@@ -643,7 +651,7 @@ func (e *WriteEndpoint) CreateTemp(
 	}, nil
 }
 
-func (e *WriteEndpoint) Rename(oldRel, newRel string) error {
+func (e *Writer) Rename(oldRel, newRel string) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -665,7 +673,7 @@ func (e *WriteEndpoint) Rename(oldRel, newRel string) error {
 	return e.expectAck(ch)
 }
 
-func (e *WriteEndpoint) Remove(relPath string) error {
+func (e *Writer) Remove(relPath string) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -684,7 +692,7 @@ func (e *WriteEndpoint) Remove(relPath string) error {
 	return e.expectAck(ch)
 }
 
-func (e *WriteEndpoint) RemoveAll(relPath string) error {
+func (e *Writer) RemoveAll(relPath string) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -703,7 +711,7 @@ func (e *WriteEndpoint) RemoveAll(relPath string) error {
 	return e.expectAck(ch)
 }
 
-func (e *WriteEndpoint) Symlink(target, newRel string) error {
+func (e *Writer) Symlink(target, newRel string) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -722,7 +730,7 @@ func (e *WriteEndpoint) Symlink(target, newRel string) error {
 	return e.expectAck(ch)
 }
 
-func (e *WriteEndpoint) Link(oldRel, newRel string) error {
+func (e *Writer) Link(oldRel, newRel string) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -744,7 +752,7 @@ func (e *WriteEndpoint) Link(oldRel, newRel string) error {
 	return e.expectAck(ch)
 }
 
-func (e *WriteEndpoint) SetMetadata(
+func (e *Writer) SetMetadata(
 	relPath string,
 	entry transport.FileEntry,
 	opts transport.MetadataOpts,
@@ -771,20 +779,20 @@ func (e *WriteEndpoint) SetMetadata(
 	return e.expectAck(ch)
 }
 
-func (e *WriteEndpoint) Walk(fn func(entry transport.FileEntry) error) error {
+func (e *Writer) Walk(fn func(entry transport.FileEntry) error) error {
 	return e.walkRel("", fn)
 }
 
 // WalkSubtree walks a subtree starting at subDir (relative to endpoint root).
-// This is a beam-specific method (not on the transport.WriteEndpoint interface),
+// This is a beam-specific method (not on the transport.ReadWriter interface),
 // accessed via type assertion for building destination indexes efficiently.
-func (e *WriteEndpoint) WalkSubtree(subDir string, fn func(entry transport.FileEntry) error) error {
+func (e *Writer) WalkSubtree(subDir string, fn func(entry transport.FileEntry) error) error {
 	return e.walkRel(subDir, fn)
 }
 
 // walkRel walks a subtree starting at walkRoot (relative to endpoint root).
 // An empty walkRoot walks the entire endpoint root.
-func (e *WriteEndpoint) walkRel(walkRoot string, fn func(entry transport.FileEntry) error) error {
+func (e *Writer) walkRel(walkRoot string, fn func(entry transport.FileEntry) error) error {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -822,7 +830,7 @@ func (e *WriteEndpoint) walkRel(walkRoot string, fn func(entry transport.FileEnt
 	return errors.New("stream closed during walk")
 }
 
-func (e *WriteEndpoint) Stat(relPath string) (transport.FileEntry, error) {
+func (e *Writer) Stat(relPath string) (transport.FileEntry, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -855,7 +863,7 @@ func (e *WriteEndpoint) Stat(relPath string) (transport.FileEntry, error) {
 	return entry, nil
 }
 
-func (e *WriteEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
+func (e *Writer) OpenRead(relPath string) (io.ReadCloser, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 
@@ -875,7 +883,7 @@ func (e *WriteEndpoint) OpenRead(relPath string) (io.ReadCloser, error) {
 	return &beamReader{mux: e.mux, streamID: streamID, ch: ch}, nil
 }
 
-func (e *WriteEndpoint) Hash(relPath string) (string, error) {
+func (e *Writer) Hash(relPath string) (string, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
@@ -907,7 +915,7 @@ func (e *WriteEndpoint) Hash(relPath string) (string, error) {
 }
 
 // ComputeSignature asks the remote daemon to compute block signatures of a file.
-func (e *WriteEndpoint) ComputeSignature(
+func (e *Writer) ComputeSignature(
 	relPath string,
 	fileSize int64,
 ) (transport.Signature, error) {
@@ -941,7 +949,7 @@ func (e *WriteEndpoint) ComputeSignature(
 }
 
 // ApplyDelta asks the remote daemon to reconstruct a file from basis + delta ops.
-func (e *WriteEndpoint) ApplyDelta(
+func (e *Writer) ApplyDelta(
 	basisRelPath, tempRelPath string,
 	ops []transport.DeltaOp,
 ) (int64, error) {
@@ -979,21 +987,22 @@ func (e *WriteEndpoint) ApplyDelta(
 }
 
 // WriteFileBatch sends a batch of small files to the remote daemon in a single
-// round-trip. This is a beam-specific method (not on the transport.WriteEndpoint
-// interface), accessed via type assertion, same pattern as delta transfer.
-func (e *WriteEndpoint) WriteFileBatch(
-	req proto.WriteFileBatchReq,
-) ([]proto.WriteFileBatchResult, error) {
+// round-trip. Implements transport.BatchWriter.
+func (e *Writer) WriteFileBatch(
+	req transport.BatchWriteRequest,
+) ([]transport.BatchWriteResult, error) {
 	streamID := e.allocStream()
 	ch := e.mux.OpenStream(streamID)
 	defer e.mux.CloseStream(streamID)
 
+	wireReq := proto.FromBatchWriteRequest(req)
+
 	// Translate entry RelPaths to server-relative.
-	for i := range req.Entries {
-		req.Entries[i].RelPath = serverPath(e.pathPrefix, req.Entries[i].RelPath)
+	for i := range wireReq.Entries {
+		wireReq.Entries[i].RelPath = serverPath(e.pathPrefix, wireReq.Entries[i].RelPath)
 	}
 
-	payload, err := req.MarshalMsg(nil)
+	payload, err := wireReq.MarshalMsg(nil)
 	if err != nil {
 		return nil, err
 	}
@@ -1015,14 +1024,14 @@ func (e *WriteEndpoint) WriteFileBatch(
 	if _, err := resp.UnmarshalMsg(f.Payload); err != nil {
 		return nil, err
 	}
-	return resp.Results, nil
+	return proto.ToBatchWriteResults(resp.Results), nil
 }
 
-func (e *WriteEndpoint) Root() string                 { return e.root }
-func (e *WriteEndpoint) Caps() transport.Capabilities { return e.caps }
-func (e *WriteEndpoint) Close() error                 { return e.mux.Close() }
+func (e *Writer) Root() string                 { return e.root }
+func (e *Writer) Caps() transport.Capabilities { return e.caps }
+func (e *Writer) Close() error                 { return e.mux.Close() }
 
-func (*WriteEndpoint) expectAck(ch <-chan proto.Frame) error {
+func (*Writer) expectAck(ch <-chan proto.Frame) error {
 	f, ok := <-ch
 	if !ok {
 		return errors.New("stream closed")

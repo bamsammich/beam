@@ -35,8 +35,8 @@ func TestDialBeamConn(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
 
 	// Start the server side: create mux, handler, and handshake listener.
-	readEP := transport.NewLocalReadEndpoint(dir)
-	writeEP := transport.NewLocalWriteEndpoint(dir)
+	readEP := transport.NewLocalReader(dir)
+	writeEP := transport.NewLocalWriter(dir)
 	serverMux := proto.NewMux(serverConn)
 	handler := proto.NewHandler(readEP, writeEP, serverMux)
 
@@ -96,8 +96,8 @@ func TestDialBeamConn(t *testing.T) {
 	assert.True(t, caps.NativeHash)
 	assert.True(t, caps.AtomicRename)
 
-	// Create a ReadEndpoint and verify it works.
-	readBeamEP := beam.NewReadEndpoint(mux, dir, root, caps)
+	// Create a Reader and verify it works.
+	readBeamEP := beam.NewReader(mux, dir, root, caps)
 
 	// Test Stat.
 	entry, err := readBeamEP.Stat("hello.txt")

@@ -38,7 +38,7 @@ cmd/beam/
 
 internal/
   engine/
-    engine.go              — orchestrator, wires endpoints into components
+    engine.go              — orchestrator, wires connectors into components
     scanner.go             — parallel directory walker, emits FileTask
     worker.go              — copy worker pool, consumes FileTask
     batcher.go             — small-file batch accumulator for beam protocol
@@ -52,14 +52,16 @@ internal/
     copy_fallback.go       — read/write with large aligned buffers
 
   transport/
-    transport.go           — ReadEndpoint / WriteEndpoint interfaces, FileEntry, Capabilities
+    transport.go           — Transport, Reader / Writer / ReadWriter interfaces, capability interfaces, FileEntry, Capabilities
+    connector.go           — LocalTransport (local filesystem transport)
     local.go               — local filesystem endpoints
-    sftp.go                — SSH/SFTP endpoints
+    sftp.go                — SSH/SFTP endpoints (with borrowed-connection support)
     ssh.go                 — SSH connection management
     delta.go               — rsync-style block matching delta transfer
     location.go            — user@host:path location parsing
     beam/
-      endpoint.go          — beam protocol ReadEndpoint + WriteEndpoint (incl. WriteFileBatch)
+      connector.go         — beam.Transport (direct beam://), beam.SSHTransport (SSH with beam auto-detect + SFTP fallback)
+      endpoint.go          — beam protocol Reader + Writer (incl. WriteFileBatch)
       discover.go          — SSH beam daemon auto-detection, tunnel, convenience wrappers
     proto/
       daemon.go            — standalone TCP daemon (beam daemon)
@@ -101,6 +103,26 @@ internal/
 [Verify goroutine pool]
 ```
 
+### Transport Layer
+
+Every parsed location resolves to a `transport.Transport` — the engine accepts transports (not pre-made endpoints) and calls `ReaderAt`/`ReadWriterAt` when it needs endpoints:
+
+- `LocalTransport` — creates fresh local endpoints per call
+- `beam.Transport` — manages a direct `beam://` connection; caches endpoints (shared mux)
+- `beam.SSHTransport` — dials SSH, auto-detects beam daemon, delegates to `beam.Transport` or SFTP fallback
+
+### Capability Interfaces
+
+Optional transport features are discovered via type assertion on endpoints (idiomatic Go optional interface pattern, like `io.WriterTo`):
+
+- `BatchWriter` — batched small-file writes (`WriteFileBatch`)
+- `DeltaSource` — server-side signature/block-matching (`ComputeSignature`, `MatchBlocks`)
+- `DeltaTarget` — server-side delta application (`ComputeSignature`, `ApplyDelta`)
+- `SubtreeWalker` — subtree walking relative to endpoint root (`WalkSubtree`)
+- `PathResolver` — resolve relative paths to absolute filesystem paths (`AbsPath`)
+
+The engine never type-asserts concrete transport types — only these capability interfaces.
+
 ### Protocol Backward Compatibility (STRICT)
 
 All beam protocol messages use msgpack map encoding (field names as string keys, NOT positional). New fields MUST be additive with zero-value defaults. Old clients MUST ignore unknown fields. Never remove or rename a field. This rule applies to all types in `internal/transport/proto/messages.go`.
@@ -126,7 +148,7 @@ Beam endpoints translate between client-relative and server-relative paths using
 - **Atomic writes**: Never write directly to the destination path. Always write to `<dest>.<uuid>.beam-tmp`, then `os.Rename`. Crash/ctrl-c never leaves a partial file.
 - **Delta transfer**: Uses xxHash rolling checksums + BLAKE3 strong hash. Block size: `sqrt(filesize)` clamped to [512B, 128KB]. On by default for network transports.
 - **Skip detection**: mtime + size match = skip (same as rsync default).
-- **Batch RPC is beam-specific**: Not on the `WriteEndpoint` interface. Accessed via type assertion, same pattern as delta transfer methods.
+- **Batch RPC**: Accessed via `transport.BatchWriter` capability interface type assertion on endpoints. Same pattern as `DeltaSource`/`DeltaTarget` for delta transfer.
 - **One failure doesn't abort a batch**: Server processes each entry independently, returns per-file OK/Error.
 
 ---
@@ -162,12 +184,13 @@ All initial phases are implemented:
 - **Batch RPC** — WriteFileBatchReq/Resp for small-file batching, TCP/mux optimizations
 - **Path fix + DstIndex** — Beam endpoint path translation, subtree Walk, pre-built destination index for skip detection
 - **Phase 6d** — SSH beam daemon auto-detection: reads `/etc/beam/daemon.toml` over SFTP, tunnels TLS connection to daemon through SSH, upgrades to beam protocol transparently; `--no-beam-ssh` flag to force SFTP
+- **Transport Factory** — Transport interface + capability interfaces (BatchWriter, DeltaSource, DeltaTarget, SubtreeWalker, PathResolver); beam.Transport, beam.SSHTransport with auto-detect composition; engine decoupled from concrete types
 
 ### Known Issues
 
 - **`--bwlimit` has no effect on local copies.** The kernel fast paths (`copy_file_range`, `sendfile`) bypass userspace entirely, so the `rate.Limiter` wrapping `io.Reader`/`io.Writer` is never hit. Fix: when `--bwlimit` is set, skip the kernel fast path and fall back to the userspace read/write loop where the limiter lives.
 - **VHS demo GIFs need re-recording.** The current inline and TUI demo GIFs complete too fast to show the HUD. Re-record after bwlimit is fixed for local copies, or use a real network transfer between two machines.
-- **`DialBeam`/`DialBeamConn`/`DialBeamTunnel` return 4 values.** This triggers `function-result-limit` lint errors (currently suppressed with `//nolint:revive`). Fix: introduce a `BeamConn` result struct (`Mux *proto.Mux`, `Root string`, `Caps transport.Capabilities`) so all three functions return `(BeamConn, error)`. Update all call sites in `endpoint.go`, `discover.go`, `endpoint_test.go`, `integration_test.go`, and `cmd/beam/main.go`.
+- **`DialBeam`/`DialBeamConn`/`DialBeamTunnel` return 4 values.** This triggers `function-result-limit` lint errors (currently suppressed with `//nolint:revive`). Fix: introduce a `BeamConn` result struct (`Mux *proto.Mux`, `Root string`, `Caps transport.Capabilities`) so all three functions return `(BeamConn, error)`. Update all call sites in `beam/endpoint.go`, `beam/discover.go`, `beam/*_test.go`, and `cmd/beam/main.go`.
 
 ---
 

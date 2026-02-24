@@ -31,10 +31,10 @@ func setupTestTree(t *testing.T) string {
 	return root
 }
 
-func TestLocalReadEndpoint_Walk(t *testing.T) {
+func TestLocalReader_Walk(t *testing.T) {
 	t.Parallel()
 	root := setupTestTree(t)
-	ep := transport.NewLocalReadEndpoint(root)
+	ep := transport.NewLocalReader(root)
 
 	var entries []transport.FileEntry
 	err := ep.Walk(func(entry transport.FileEntry) error {
@@ -60,10 +60,10 @@ func TestLocalReadEndpoint_Walk(t *testing.T) {
 	)
 }
 
-func TestLocalReadEndpoint_Stat(t *testing.T) {
+func TestLocalReader_Stat(t *testing.T) {
 	t.Parallel()
 	root := setupTestTree(t)
-	ep := transport.NewLocalReadEndpoint(root)
+	ep := transport.NewLocalReader(root)
 
 	entry, err := ep.Stat("file.txt")
 	require.NoError(t, err)
@@ -82,10 +82,10 @@ func TestLocalReadEndpoint_Stat(t *testing.T) {
 	assert.Error(t, err)
 }
 
-func TestLocalReadEndpoint_ReadDir(t *testing.T) {
+func TestLocalReader_ReadDir(t *testing.T) {
 	t.Parallel()
 	root := setupTestTree(t)
-	ep := transport.NewLocalReadEndpoint(root)
+	ep := transport.NewLocalReader(root)
 
 	entries, err := ep.ReadDir("sub")
 	require.NoError(t, err)
@@ -99,10 +99,10 @@ func TestLocalReadEndpoint_ReadDir(t *testing.T) {
 	assert.True(t, names["link"])
 }
 
-func TestLocalReadEndpoint_OpenRead(t *testing.T) {
+func TestLocalReader_OpenRead(t *testing.T) {
 	t.Parallel()
 	root := setupTestTree(t)
-	ep := transport.NewLocalReadEndpoint(root)
+	ep := transport.NewLocalReader(root)
 
 	rc, err := ep.OpenRead("file.txt")
 	require.NoError(t, err)
@@ -113,10 +113,10 @@ func TestLocalReadEndpoint_OpenRead(t *testing.T) {
 	assert.Equal(t, []byte("hello"), data)
 }
 
-func TestLocalReadEndpoint_Hash(t *testing.T) {
+func TestLocalReader_Hash(t *testing.T) {
 	t.Parallel()
 	root := setupTestTree(t)
-	ep := transport.NewLocalReadEndpoint(root)
+	ep := transport.NewLocalReader(root)
 
 	hash, err := ep.Hash("file.txt")
 	require.NoError(t, err)
@@ -129,9 +129,9 @@ func TestLocalReadEndpoint_Hash(t *testing.T) {
 	assert.Equal(t, hash, hash2)
 }
 
-func TestLocalReadEndpoint_Caps(t *testing.T) {
+func TestLocalReader_Caps(t *testing.T) {
 	t.Parallel()
-	ep := transport.NewLocalReadEndpoint("/tmp")
+	ep := transport.NewLocalReader("/tmp")
 	caps := ep.Caps()
 	assert.True(t, caps.SparseDetect)
 	assert.True(t, caps.Hardlinks)
@@ -141,10 +141,10 @@ func TestLocalReadEndpoint_Caps(t *testing.T) {
 	assert.True(t, caps.NativeHash)
 }
 
-func TestLocalWriteEndpoint_MkdirAll(t *testing.T) {
+func TestLocalWriter_MkdirAll(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	ep := transport.NewLocalWriteEndpoint(root)
+	ep := transport.NewLocalWriter(root)
 
 	err := ep.MkdirAll(filepath.Join("a", "b", "c"), 0755)
 	require.NoError(t, err)
@@ -154,10 +154,10 @@ func TestLocalWriteEndpoint_MkdirAll(t *testing.T) {
 	assert.True(t, info.IsDir())
 }
 
-func TestLocalWriteEndpoint_CreateTemp_Rename(t *testing.T) {
+func TestLocalWriter_CreateTemp_Rename(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	ep := transport.NewLocalWriteEndpoint(root)
+	ep := transport.NewLocalWriter(root)
 
 	wf, err := ep.CreateTemp("target.txt", 0644)
 	require.NoError(t, err)
@@ -179,12 +179,12 @@ func TestLocalWriteEndpoint_CreateTemp_Rename(t *testing.T) {
 	assert.Equal(t, []byte("temp content"), data)
 }
 
-func TestLocalWriteEndpoint_Remove(t *testing.T) {
+func TestLocalWriter_Remove(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(root, "removeme.txt"), []byte("bye"), 0644))
 
-	ep := transport.NewLocalWriteEndpoint(root)
+	ep := transport.NewLocalWriter(root)
 	err := ep.Remove("removeme.txt")
 	require.NoError(t, err)
 
@@ -192,13 +192,13 @@ func TestLocalWriteEndpoint_Remove(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 }
 
-func TestLocalWriteEndpoint_RemoveAll(t *testing.T) {
+func TestLocalWriter_RemoveAll(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	require.NoError(t, os.MkdirAll(filepath.Join(root, "dir", "sub"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(root, "dir", "sub", "f.txt"), []byte("x"), 0644))
 
-	ep := transport.NewLocalWriteEndpoint(root)
+	ep := transport.NewLocalWriter(root)
 	err := ep.RemoveAll("dir")
 	require.NoError(t, err)
 
@@ -206,12 +206,12 @@ func TestLocalWriteEndpoint_RemoveAll(t *testing.T) {
 	assert.True(t, os.IsNotExist(err))
 }
 
-func TestLocalWriteEndpoint_Symlink(t *testing.T) {
+func TestLocalWriter_Symlink(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(root, "target.txt"), []byte("data"), 0644))
 
-	ep := transport.NewLocalWriteEndpoint(root)
+	ep := transport.NewLocalWriter(root)
 	err := ep.Symlink("target.txt", "link.txt")
 	require.NoError(t, err)
 
@@ -220,12 +220,12 @@ func TestLocalWriteEndpoint_Symlink(t *testing.T) {
 	assert.Equal(t, "target.txt", target)
 }
 
-func TestLocalWriteEndpoint_Link(t *testing.T) {
+func TestLocalWriter_Link(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(root, "original.txt"), []byte("data"), 0644))
 
-	ep := transport.NewLocalWriteEndpoint(root)
+	ep := transport.NewLocalWriter(root)
 	err := ep.Link("original.txt", "hardlink.txt")
 	require.NoError(t, err)
 
@@ -241,10 +241,10 @@ func TestLocalWriteEndpoint_Link(t *testing.T) {
 	assert.True(t, os.SameFile(orig, link))
 }
 
-func TestLocalWriteEndpoint_Walk(t *testing.T) {
+func TestLocalWriter_Walk(t *testing.T) {
 	t.Parallel()
 	root := setupTestTree(t)
-	ep := transport.NewLocalWriteEndpoint(root)
+	ep := transport.NewLocalWriter(root)
 
 	var entries []transport.FileEntry
 	err := ep.Walk(func(entry transport.FileEntry) error {
@@ -255,13 +255,13 @@ func TestLocalWriteEndpoint_Walk(t *testing.T) {
 	assert.NotEmpty(t, entries)
 }
 
-func TestLocalWriteEndpoint_Hash(t *testing.T) {
+func TestLocalWriter_Hash(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(root, "test.txt"), []byte("hash me"), 0644))
 
-	readEP := transport.NewLocalReadEndpoint(root)
-	writeEP := transport.NewLocalWriteEndpoint(root)
+	readEP := transport.NewLocalReader(root)
+	writeEP := transport.NewLocalWriter(root)
 
 	hash1, err := readEP.Hash("test.txt")
 	require.NoError(t, err)
@@ -273,7 +273,7 @@ func TestLocalWriteEndpoint_Hash(t *testing.T) {
 func TestLocalFile(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	ep := transport.NewLocalWriteEndpoint(root)
+	ep := transport.NewLocalWriter(root)
 
 	wf, err := ep.CreateTemp("test.txt", 0644)
 	require.NoError(t, err)

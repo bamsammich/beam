@@ -24,8 +24,8 @@ type DaemonConfig struct {
 // Daemon serves the beam protocol over TLS.
 type Daemon struct {
 	listener net.Listener
-	readEP   *transport.LocalReadEndpoint
-	writeEP  *transport.LocalWriteEndpoint
+	readEP   *transport.LocalReader
+	writeEP  *transport.LocalWriter
 	conns    map[net.Conn]struct{}
 	cfg      DaemonConfig
 	mu       sync.Mutex
@@ -65,8 +65,8 @@ func NewDaemon(cfg DaemonConfig) (*Daemon, error) {
 	return &Daemon{
 		cfg:      cfg,
 		listener: listener,
-		readEP:   transport.NewLocalReadEndpoint(cfg.Root),
-		writeEP:  transport.NewLocalWriteEndpoint(cfg.Root),
+		readEP:   transport.NewLocalReader(cfg.Root),
+		writeEP:  transport.NewLocalWriter(cfg.Root),
 		conns:    make(map[net.Conn]struct{}),
 	}, nil
 }

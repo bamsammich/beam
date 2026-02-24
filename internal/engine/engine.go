@@ -19,14 +19,13 @@ import (
 	"github.com/bamsammich/beam/internal/filter"
 	"github.com/bamsammich/beam/internal/stats"
 	"github.com/bamsammich/beam/internal/transport"
-	"github.com/bamsammich/beam/internal/transport/beam"
 )
 
 // Config describes a copy operation.
 type Config struct {
 	Stats          stats.ReadWriter
-	SrcEndpoint    transport.ReadEndpoint
-	DstEndpoint    transport.WriteEndpoint
+	SrcTransport   transport.Transport
+	DstTransport   transport.Transport
 	Events         chan<- event.Event
 	Filter         *filter.Chain
 	WorkerLimit    *atomic.Int32
@@ -90,7 +89,7 @@ func resolveSources(
 	sources []string,
 	dst string,
 	recursive bool,
-	srcEP transport.ReadEndpoint,
+	srcEP transport.Reader,
 ) ([]resolvedSource, error) {
 	resolved := make([]resolvedSource, 0, len(sources))
 
@@ -179,10 +178,27 @@ func Run(ctx context.Context, cfg Config) Result {
 		return Result{Err: errors.New("no sources specified")}
 	}
 
+	if cfg.SrcTransport == nil {
+		return Result{Err: errors.New("SrcTransport is required")}
+	}
+	if cfg.DstTransport == nil {
+		return Result{Err: errors.New("DstTransport is required")}
+	}
+
 	// Archive implies recursive + all preserve flags.
 	recursive := cfg.Recursive || cfg.Archive
 
-	resolved, err := resolveSources(cfg.Sources, cfg.Dst, recursive, cfg.SrcEndpoint)
+	// Connect source endpoint for remote sources (used for stat during resolve).
+	var srcEP transport.Reader
+	if cfg.SrcTransport.Protocol() != transport.ProtocolLocal {
+		var err error
+		srcEP, err = cfg.SrcTransport.ReaderAt(cfg.Sources[0])
+		if err != nil {
+			return Result{Err: fmt.Errorf("connect source: %w", err)}
+		}
+	}
+
+	resolved, err := resolveSources(cfg.Sources, cfg.Dst, recursive, srcEP)
 	if err != nil {
 		return Result{Err: err}
 	}
@@ -213,30 +229,20 @@ func Run(ctx context.Context, cfg Config) Result {
 	return runMultiSourceCopy(ctx, cfg, collector, resolved)
 }
 
-// ensureSrcEndpoint returns the configured endpoint or creates a local one.
-//
 //nolint:ireturn // factory returns interface by design
-func ensureSrcEndpoint(
-	ep transport.ReadEndpoint,
+func readerAt(
+	t transport.Transport,
 	root string,
-) transport.ReadEndpoint {
-	if ep != nil {
-		return ep
-	}
-	return transport.NewLocalReadEndpoint(root)
+) (transport.Reader, error) {
+	return t.ReaderAt(root)
 }
 
-// ensureDstEndpoint returns the configured endpoint or creates a local one.
-//
 //nolint:ireturn // factory returns interface by design
-func ensureDstEndpoint(
-	ep transport.WriteEndpoint,
+func readWriterAt(
+	t transport.Transport,
 	root string,
-) transport.WriteEndpoint {
-	if ep != nil {
-		return ep
-	}
-	return transport.NewLocalWriteEndpoint(root)
+) (transport.ReadWriter, error) {
+	return t.ReadWriterAt(root)
 }
 
 //nolint:gocyclo,revive // cyclomatic: top-level orchestrator — prescan, scan, worker dispatch, delete, verify
@@ -248,6 +254,8 @@ func runMultiSourceCopy(
 ) Result {
 	var copyErr error
 
+	isRemote := cfg.SrcTransport.Protocol() != transport.ProtocolLocal
+
 	// Prescan all directory sources for progress totals.
 	var totalFiles, totalBytes int64
 	for _, rs := range sources {
@@ -255,9 +263,14 @@ func runMultiSourceCopy(
 		case rs.isFile:
 			totalFiles++
 			totalBytes += rs.entry.Size
-		case cfg.SrcEndpoint != nil:
+		case isRemote:
 			// Remote source: use endpoint Walk for prescan instead of local Prescan.
-			if err := cfg.SrcEndpoint.Walk(func(e transport.FileEntry) error {
+			srcEP, err := readerAt(cfg.SrcTransport, rs.srcPath)
+			if err != nil {
+				slog.Warn("remote prescan connect failed", "error", err)
+				break
+			}
+			if err := srcEP.Walk(func(e transport.FileEntry) error {
 				if e.Mode.IsRegular() {
 					if cfg.Filter != nil && !cfg.Filter.Match(e.RelPath, false, e.Size) {
 						return nil
@@ -267,7 +280,7 @@ func runMultiSourceCopy(
 				}
 				return nil
 			}); err != nil {
-				slog.Debug("remote prescan walk failed", "error", err)
+				slog.Warn("remote prescan walk failed", "error", err, "endpoint_root", srcEP.Root())
 			}
 		default:
 			f, b := Prescan(ctx, rs.srcPath, cfg.Filter)
@@ -282,10 +295,16 @@ func runMultiSourceCopy(
 		TotalSize: totalBytes,
 	})
 
-	// Worker pool endpoints: SrcEndpoint rooted at "/" so filepath.Rel works
-	// for any absolute source path. DstEndpoint rooted at cfg.Dst.
-	workerSrcEP := ensureSrcEndpoint(cfg.SrcEndpoint, "/")
-	workerDstEP := ensureDstEndpoint(cfg.DstEndpoint, cfg.Dst)
+	// Worker pool endpoints: SrcTransport rooted at "/" so filepath.Rel works
+	// for any absolute source path. DstTransport rooted at cfg.Dst.
+	workerSrcEP, err := readerAt(cfg.SrcTransport, "/")
+	if err != nil {
+		return Result{Err: fmt.Errorf("connect source endpoint: %w", err)}
+	}
+	workerDstEP, err := readWriterAt(cfg.DstTransport, cfg.Dst)
+	if err != nil {
+		return Result{Err: fmt.Errorf("connect dest endpoint: %w", err)}
+	}
 
 	workerCfg := WorkerConfig{
 		NumWorkers:    cfg.Workers,
@@ -332,7 +351,7 @@ func runMultiSourceCopy(
 			if rs.isFile {
 				// File source: emit a single task directly.
 				task := fileEntryToTask(rs.srcPath, rs.dstBase, rs.entry)
-				if cfg.SrcEndpoint == nil && task.Size > 0 {
+				if cfg.SrcTransport.Protocol() == transport.ProtocolLocal && task.Size > 0 {
 					fd, openErr := os.Open(rs.srcPath)
 					if openErr == nil {
 						segments, sErr := DetectSparseSegments(fd, task.Size)
@@ -361,8 +380,22 @@ func runMultiSourceCopy(
 
 			// Per-source endpoints: rooted at the source/dest pair so
 			// relative paths in scanner/delete/verify match the endpoint root.
-			srcEP := ensureSrcEndpoint(cfg.SrcEndpoint, rs.srcPath)
-			dstEP := ensureDstEndpoint(cfg.DstEndpoint, rs.dstBase)
+			srcEP, epErr := readerAt(cfg.SrcTransport, rs.srcPath)
+			if epErr != nil {
+				select {
+				case allErrs <- fmt.Errorf("connect source for %s: %w", rs.srcPath, epErr):
+				default:
+				}
+				continue
+			}
+			dstEP, epErr := readWriterAt(cfg.DstTransport, rs.dstBase)
+			if epErr != nil {
+				select {
+				case allErrs <- fmt.Errorf("connect dest for %s: %w", rs.dstBase, epErr):
+				default:
+				}
+				continue
+			}
 
 			// Build destination index for remote endpoints (avoids per-file Stat RPCs).
 			dstIndex := buildDstIndex(dstEP, rs.dstBase)
@@ -451,14 +484,28 @@ func runMultiSourceCopy(
 					"src", rs.srcPath, "dst", rs.dstBase)
 				continue
 			}
+			delSrcEP, delErr := readerAt(cfg.SrcTransport, rs.srcPath)
+			if delErr != nil {
+				if copyErr == nil {
+					copyErr = delErr
+				}
+				continue
+			}
+			delDstEP, delErr := readWriterAt(cfg.DstTransport, rs.dstBase)
+			if delErr != nil {
+				if copyErr == nil {
+					copyErr = delErr
+				}
+				continue
+			}
 			delCfg := DeleteConfig{
 				SrcRoot:     rs.srcPath,
 				DstRoot:     rs.dstBase,
 				Filter:      cfg.Filter,
 				DryRun:      cfg.DryRun,
 				Events:      cfg.Events,
-				SrcEndpoint: ensureSrcEndpoint(cfg.SrcEndpoint, rs.srcPath),
-				DstEndpoint: ensureDstEndpoint(cfg.DstEndpoint, rs.dstBase),
+				SrcEndpoint: delSrcEP,
+				DstEndpoint: delDstEP,
 			}
 			if _, err := DeleteExtraneous(ctx, delCfg); err != nil && copyErr == nil {
 				copyErr = err
@@ -472,6 +519,20 @@ func runMultiSourceCopy(
 			if rs.isFile {
 				continue
 			}
+			vfySrcEP, vfyErr := readerAt(cfg.SrcTransport, rs.srcPath)
+			if vfyErr != nil {
+				if copyErr == nil {
+					copyErr = vfyErr
+				}
+				continue
+			}
+			vfyDstEP, vfyErr := readWriterAt(cfg.DstTransport, rs.dstBase)
+			if vfyErr != nil {
+				if copyErr == nil {
+					copyErr = vfyErr
+				}
+				continue
+			}
 			vr := Verify(ctx, VerifyConfig{
 				SrcRoot:     rs.srcPath,
 				DstRoot:     rs.dstBase,
@@ -479,8 +540,8 @@ func runMultiSourceCopy(
 				Filter:      cfg.Filter,
 				Events:      cfg.Events,
 				Stats:       collector,
-				SrcEndpoint: ensureSrcEndpoint(cfg.SrcEndpoint, rs.srcPath),
-				DstEndpoint: ensureDstEndpoint(cfg.DstEndpoint, rs.dstBase),
+				SrcEndpoint: vfySrcEP,
+				DstEndpoint: vfyDstEP,
 			})
 			if vr.Failed > 0 && copyErr == nil {
 				copyErr = fmt.Errorf("%d files failed verification", vr.Failed)
@@ -518,8 +579,14 @@ func runFileCopy(
 		return Result{Err: fmt.Errorf("create parent dir: %w", err)}
 	}
 
-	srcEP := ensureSrcEndpoint(cfg.SrcEndpoint, filepath.Dir(rs.srcPath))
-	dstEP := ensureDstEndpoint(cfg.DstEndpoint, dstDir)
+	srcEP, err := readerAt(cfg.SrcTransport, filepath.Dir(rs.srcPath))
+	if err != nil {
+		return Result{Err: fmt.Errorf("connect source: %w", err)}
+	}
+	dstEP, err := readWriterAt(cfg.DstTransport, dstDir)
+	if err != nil {
+		return Result{Err: fmt.Errorf("connect dest: %w", err)}
+	}
 
 	workerCfg := WorkerConfig{
 		NumWorkers:    1,
@@ -548,7 +615,7 @@ func runFileCopy(
 	errs := make(chan error, 1)
 
 	task := fileEntryToTask(rs.srcPath, dst, rs.entry)
-	if cfg.SrcEndpoint == nil && task.Size > 0 {
+	if cfg.SrcTransport.Protocol() == transport.ProtocolLocal && task.Size > 0 {
 		fd, openErr := os.Open(rs.srcPath)
 		if openErr == nil {
 			segments, sErr := DetectSparseSegments(fd, task.Size)
@@ -577,23 +644,23 @@ func runFileCopy(
 }
 
 // buildDstIndex pre-walks the destination to build a lookup table for skip
-// detection. For beam endpoints, this replaces N per-file Stat RPCs with a
-// single streaming Walk RPC. Returns nil for local endpoints where per-file
-// Stat is cheap.
+// detection. For endpoints implementing SubtreeWalker, this replaces N per-file
+// Stat RPCs with a single streaming Walk RPC. Returns nil for endpoints where
+// per-file Stat is cheap (e.g. local).
 func buildDstIndex(
-	ep transport.WriteEndpoint,
+	ep transport.ReadWriter,
 	dstBase string,
 ) map[string]transport.FileEntry {
-	beamEP, ok := ep.(*beam.WriteEndpoint)
+	walker, ok := ep.(transport.SubtreeWalker)
 	if !ok {
-		return nil // local endpoints: per-file Stat is fast enough
+		return nil // no subtree walk support: per-file Stat is fast enough
 	}
 
-	// Compute the subtree to walk relative to the beam endpoint root.
-	subDir, err := filepath.Rel(beamEP.Root(), dstBase)
+	// Compute the subtree to walk relative to the endpoint root.
+	subDir, err := filepath.Rel(ep.Root(), dstBase)
 	if err != nil {
 		slog.Debug("buildDstIndex: rel path failed",
-			"root", beamEP.Root(), "dstBase", dstBase, "error", err)
+			"root", ep.Root(), "dstBase", dstBase, "error", err)
 		return nil
 	}
 	if subDir == "." {
@@ -601,7 +668,7 @@ func buildDstIndex(
 	}
 
 	index := make(map[string]transport.FileEntry)
-	if err := beamEP.WalkSubtree(subDir, func(entry transport.FileEntry) error {
+	if err := walker.WalkSubtree(subDir, func(entry transport.FileEntry) error {
 		index[entry.RelPath] = entry
 		return nil
 	}); err != nil {

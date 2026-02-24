@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -22,8 +23,8 @@ type ScannerConfig struct {
 	Events         chan<- event.Event
 	Filter         *filter.Chain
 	Stats          stats.Writer                   // if set, skipped-file stats are recorded directly
-	SrcEndpoint    transport.ReadEndpoint         // nil = local filesystem
-	DstEndpoint    transport.WriteEndpoint        // nil = local filesystem
+	SrcEndpoint    transport.Reader               // nil = local filesystem
+	DstEndpoint    transport.ReadWriter           // nil = local filesystem
 	DstIndex       map[string]transport.FileEntry // pre-populated destination index (avoids per-file Stat RPCs)
 	SrcRoot        string
 	DstRoot        string
@@ -74,7 +75,7 @@ func (s *Scanner) scanTree(ctx context.Context) {
 
 	// Remote sources: use endpoint Walk (single streaming RPC) instead of
 	// parallel os.ReadDir which would fail for non-local paths.
-	if _, isLocal := s.cfg.SrcEndpoint.(*transport.LocalReadEndpoint); !isLocal {
+	if _, isLocal := s.cfg.SrcEndpoint.(transport.PathResolver); !isLocal {
 		s.scanTreeRemote(ctx)
 		return
 	}
@@ -112,6 +113,7 @@ func (s *Scanner) scanTree(ctx context.Context) {
 //
 //nolint:revive // cognitive-complexity: type-switch dispatch with filter, skip detection, and task emission
 func (s *Scanner) scanTreeRemote(ctx context.Context) {
+	slog.Debug("starting remote walk", "endpoint_root", s.cfg.SrcEndpoint.Root())
 	err := s.cfg.SrcEndpoint.Walk(func(entry transport.FileEntry) error {
 		select {
 		case <-ctx.Done():
@@ -167,6 +169,7 @@ func (s *Scanner) scanTreeRemote(ctx context.Context) {
 	if err != nil && ctx.Err() == nil {
 		s.sendErr(fmt.Errorf("remote walk: %w", err))
 	}
+	slog.Debug("remote walk complete", "files", s.totalFiles.Load(), "bytes", s.totalBytes.Load())
 }
 
 // processRegularRemote handles skip detection and task emission for a regular

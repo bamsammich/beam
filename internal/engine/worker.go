@@ -18,8 +18,6 @@ import (
 	"github.com/bamsammich/beam/internal/platform"
 	"github.com/bamsammich/beam/internal/stats"
 	"github.com/bamsammich/beam/internal/transport"
-	"github.com/bamsammich/beam/internal/transport/beam"
-	"github.com/bamsammich/beam/internal/transport/proto"
 )
 
 // WorkerConfig controls worker behavior.
@@ -28,8 +26,8 @@ type WorkerConfig struct {
 	Events        chan<- event.Event
 	WorkerLimit   *atomic.Int32 // runtime throttle; nil = all workers active
 	BWLimiter     *rate.Limiter // shared bandwidth limiter; nil = unlimited
-	SrcEndpoint   transport.ReadEndpoint
-	DstEndpoint   transport.WriteEndpoint
+	SrcEndpoint   transport.Reader
+	DstEndpoint   transport.ReadWriter
 	DstRoot       string // destination root for computing relative paths
 	NumWorkers    int
 	PreserveMode  bool
@@ -70,10 +68,10 @@ func NewWorkerPool(cfg WorkerConfig) (*WorkerPool, error) {
 	return wp, nil
 }
 
-// isLocalEndpoints returns true when both endpoints are local.
-func isLocalEndpoints(src transport.ReadEndpoint, dst transport.WriteEndpoint) bool {
-	_, srcLocal := src.(*transport.LocalReadEndpoint)
-	_, dstLocal := dst.(*transport.LocalWriteEndpoint)
+// isLocalEndpoints returns true when both endpoints support local path resolution.
+func isLocalEndpoints(src transport.Reader, dst transport.ReadWriter) bool {
+	_, srcLocal := src.(transport.PathResolver)
+	_, dstLocal := dst.(transport.PathResolver)
 	return srcLocal && dstLocal
 }
 
@@ -87,8 +85,8 @@ func isLocalEndpoints(src transport.ReadEndpoint, dst transport.WriteEndpoint) b
 func (wp *WorkerPool) Run(ctx context.Context, tasks <-chan FileTask, errs chan<- error) {
 	// Wrap with batching layer when destination supports batch writes.
 	taskCh := tasks
-	if beamDst, ok := wp.cfg.DstEndpoint.(*beam.WriteEndpoint); ok &&
-		beamDst.Caps().BatchWrite {
+	if _, ok := wp.cfg.DstEndpoint.(transport.BatchWriter); ok &&
+		wp.cfg.DstEndpoint.Caps().BatchWrite {
 		taskCh = batchTasks(ctx, tasks, DefaultBatchConfig())
 	}
 
@@ -322,8 +320,8 @@ func (wp *WorkerPool) copyRegularFile(ctx context.Context, task FileTask, worker
 
 	// For local endpoints, register the tmp file for crash cleanup.
 	localTmpPath := ""
-	if localDst, ok := wp.cfg.DstEndpoint.(*transport.LocalWriteEndpoint); ok {
-		localTmpPath = localDst.AbsPath(tmpRelPath)
+	if resolver, ok := wp.cfg.DstEndpoint.(transport.PathResolver); ok {
+		localTmpPath = resolver.AbsPath(tmpRelPath)
 		wp.tmpReg.register(localTmpPath)
 	}
 	defer func() {
@@ -444,12 +442,12 @@ func (wp *WorkerPool) copyFileData(
 			return 0, false, fmt.Errorf("rel path %s: %w", task.DstPath, relErr)
 		}
 
-		// Beam push-delta: dst is beam.WriteEndpoint with DeltaTransfer cap.
-		// Also handles beam-to-beam (src is beam) since we read from SrcEndpoint.
-		if beamDst, ok := wp.cfg.DstEndpoint.(*beam.WriteEndpoint); ok &&
-			beamDst.Caps().DeltaTransfer {
-			if dstEntry, err := beamDst.Stat(relDst); err == nil && dstEntry.Size > 0 {
-				n, err := wp.copyDataBeamPushDelta(task, beamDst, tmpFile.Name())
+		// Push-delta: dst supports DeltaTarget with DeltaTransfer cap.
+		// Also handles beam-to-beam since we read from SrcEndpoint.
+		if dt, ok := wp.cfg.DstEndpoint.(transport.DeltaTarget); ok &&
+			wp.cfg.DstEndpoint.Caps().DeltaTransfer {
+			if dstEntry, err := wp.cfg.DstEndpoint.Stat(relDst); err == nil && dstEntry.Size > 0 {
+				n, err := wp.copyDataPushDelta(task, dt, tmpFile.Name())
 				if err == nil {
 					return n, false, nil
 				}
@@ -457,11 +455,11 @@ func (wp *WorkerPool) copyFileData(
 			}
 		}
 
-		// Beam pull-delta: src is beam.ReadEndpoint with DeltaTransfer cap, local dst.
-		if beamSrc, ok := wp.cfg.SrcEndpoint.(*beam.ReadEndpoint); ok &&
-			beamSrc.Caps().DeltaTransfer {
+		// Pull-delta: src supports DeltaSource with DeltaTransfer cap, local dst.
+		if ds, ok := wp.cfg.SrcEndpoint.(transport.DeltaSource); ok &&
+			wp.cfg.SrcEndpoint.Caps().DeltaTransfer {
 			if info, err := os.Stat(task.DstPath); err == nil && info.Size() > 0 {
-				n, err := wp.copyDataBeamPullDelta(task, beamSrc, tmpFile)
+				n, err := wp.copyDataPullDelta(task, ds, tmpFile)
 				if err == nil {
 					return n, false, nil
 				}
@@ -569,14 +567,13 @@ func (wp *WorkerPool) copyDataDelta(
 	return countWriter.n, nil
 }
 
-// copyDataBeamPushDelta uses server-side delta: the destination daemon
-// computes signatures of its old file, the client matches blocks locally
-// (reading the source via SrcEndpoint), and the destination daemon applies
-// the delta into the caller's temp file. Works for both local→beam and
-// beam→beam (in the latter case, the source is read from the beam src endpoint).
-func (wp *WorkerPool) copyDataBeamPushDelta(
+// copyDataPushDelta uses server-side delta: the destination computes
+// signatures of its old file, the client matches blocks locally
+// (reading the source via SrcEndpoint), and the destination applies
+// the delta into the caller's temp file.
+func (wp *WorkerPool) copyDataPushDelta(
 	task FileTask,
-	beamDst *beam.WriteEndpoint,
+	dt transport.DeltaTarget,
 	tmpRelPath string,
 ) (int64, error) {
 	relDst, err := wp.relDst(task.DstPath)
@@ -585,11 +582,11 @@ func (wp *WorkerPool) copyDataBeamPushDelta(
 	}
 
 	// 1. Server computes sigs of old dest.
-	dstEntry, err := beamDst.Stat(relDst)
+	dstEntry, err := wp.cfg.DstEndpoint.Stat(relDst)
 	if err != nil {
 		return 0, fmt.Errorf("stat dest %s: %w", relDst, err)
 	}
-	sig, err := beamDst.ComputeSignature(relDst, dstEntry.Size)
+	sig, err := dt.ComputeSignature(relDst, dstEntry.Size)
 	if err != nil {
 		return 0, err
 	}
@@ -610,10 +607,7 @@ func (wp *WorkerPool) copyDataBeamPushDelta(
 	}
 
 	// 3. Server applies delta from its local basis into the caller's temp file.
-	// The temp file was already created via CreateTemp on the same daemon.
-	// handleApplyDelta opens a separate file handle, so the CreateTemp handle
-	// (still open in the handler's tempFiles map) doesn't conflict.
-	n, err := beamDst.ApplyDelta(relDst, tmpRelPath, ops)
+	n, err := dt.ApplyDelta(relDst, tmpRelPath, ops)
 	if err != nil {
 		return 0, err
 	}
@@ -621,13 +615,13 @@ func (wp *WorkerPool) copyDataBeamPushDelta(
 	return n, nil
 }
 
-// copyDataBeamPullDelta uses server-side matching: the client computes
-// signatures of its local old destination file, the source daemon matches
+// copyDataPullDelta uses server-side matching: the client computes
+// signatures of its local old destination file, the source matches
 // blocks against those signatures, and the client applies the resulting
 // delta locally using the old destination as basis.
-func (wp *WorkerPool) copyDataBeamPullDelta(
+func (wp *WorkerPool) copyDataPullDelta(
 	task FileTask,
-	beamSrc *beam.ReadEndpoint,
+	ds transport.DeltaSource,
 	tmpFile transport.WriteFile,
 ) (int64, error) {
 	// 1. Client computes sigs of its local old dest.
@@ -651,7 +645,7 @@ func (wp *WorkerPool) copyDataBeamPullDelta(
 	if err != nil {
 		return 0, fmt.Errorf("rel src path %s: %w", task.SrcPath, err)
 	}
-	ops, err := beamSrc.MatchBlocks(relSrc, sig)
+	ops, err := ds.MatchBlocks(relSrc, sig)
 	if err != nil {
 		return 0, err
 	}
@@ -918,9 +912,9 @@ func taskToEntry(task FileTask) transport.FileEntry {
 //
 //nolint:gocyclo,revive // cyclomatic: batch assembly + per-file error handling + stats emit
 func (wp *WorkerPool) processBatch(ctx context.Context, task FileTask, workerID int) error {
-	beamDst, ok := wp.cfg.DstEndpoint.(*beam.WriteEndpoint)
+	batchWriter, ok := wp.cfg.DstEndpoint.(transport.BatchWriter)
 	if !ok {
-		// Fallback: process each file individually if not a beam endpoint.
+		// Fallback: process each file individually if endpoint doesn't support batching.
 		for _, ft := range task.BatchFiles {
 			if err := wp.copyRegularFile(ctx, ft, workerID); err != nil {
 				return err
@@ -930,7 +924,7 @@ func (wp *WorkerPool) processBatch(ctx context.Context, task FileTask, workerID 
 	}
 
 	// Build the batch request: read source data for each file.
-	entries := make([]proto.WriteFileBatchEntry, 0, len(task.BatchFiles))
+	entries := make([]transport.BatchWriteEntry, 0, len(task.BatchFiles))
 	fileTasks := make([]FileTask, 0, len(task.BatchFiles))
 
 	for _, ft := range task.BatchFiles {
@@ -995,13 +989,13 @@ func (wp *WorkerPool) processBatch(ctx context.Context, task FileTask, workerID 
 			continue
 		}
 
-		entries = append(entries, proto.WriteFileBatchEntry{
+		entries = append(entries, transport.BatchWriteEntry{
 			RelPath: relDst,
 			Data:    data,
-			Perm:    ft.Mode & 0o7777,
-			Mode:    ft.Mode,
-			ModTime: ft.ModTime.UnixNano(),
-			AccTime: ft.AccTime.UnixNano(),
+			Perm:    os.FileMode(ft.Mode & 0o7777),
+			Mode:    os.FileMode(ft.Mode),
+			ModTime: ft.ModTime,
+			AccTime: ft.AccTime,
 			UID:     ft.UID,
 			GID:     ft.GID,
 		})
@@ -1013,9 +1007,9 @@ func (wp *WorkerPool) processBatch(ctx context.Context, task FileTask, workerID 
 	}
 
 	// Send batch RPC.
-	req := proto.WriteFileBatchReq{
+	req := transport.BatchWriteRequest{
 		Entries: entries,
-		Opts: proto.MetadataOptsMsg{
+		Opts: transport.MetadataOpts{
 			Mode:  wp.cfg.PreserveMode,
 			Times: !wp.cfg.NoTimes,
 			Owner: wp.cfg.PreserveOwner,
@@ -1023,7 +1017,7 @@ func (wp *WorkerPool) processBatch(ctx context.Context, task FileTask, workerID 
 		},
 	}
 
-	results, err := beamDst.WriteFileBatch(req)
+	results, err := batchWriter.WriteFileBatch(req)
 	if err != nil {
 		// Entire batch failed — report all as failed.
 		for _, ft := range fileTasks {

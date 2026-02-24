@@ -15,6 +15,13 @@ import (
 	"github.com/bamsammich/beam/internal/transport"
 )
 
+// localTransports returns LocalTransports for tests that don't need beam.
+//
+//nolint:ireturn // test helper
+func localTransports() (transport.Transport, transport.Transport) {
+	return transport.NewLocalTransport(), transport.NewLocalTransport()
+}
+
 func TestIntegration_LocalToLocal(t *testing.T) {
 	t.Parallel()
 
@@ -23,13 +30,16 @@ func TestIntegration_LocalToLocal(t *testing.T) {
 
 	createTestTree(t, srcDir)
 
+	srcConn, dstConn := localTransports()
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:   []string{srcDir + "/"},
-		Dst:       dstDir,
-		Archive:   true,
-		Recursive: true,
-		Workers:   2,
-		Events:    drainEvents(t),
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Events:       drainEvents(t),
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -48,16 +58,17 @@ func TestIntegration_LocalToBeam(t *testing.T) {
 
 	// Start a beam daemon serving dstDir.
 	addr, token := startTestDaemon(t, dstDir)
-	dstEP := dialBeamWriteEndpoint(t, addr, token, dstDir)
+	dstConn := dialBeamTransport(t, addr, token, dstDir)
 
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:     []string{srcDir + "/"},
-		Dst:         dstDir,
-		Archive:     true,
-		Recursive:   true,
-		Workers:     2,
-		Events:      drainEvents(t),
-		DstEndpoint: dstEP,
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Events:       drainEvents(t),
+		SrcTransport: transport.NewLocalTransport(),
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -94,21 +105,21 @@ func TestIntegration_BeamToLocal_NonLocalPath(t *testing.T) {
 	// Start daemon serving parentDir (data lives at parentDir/data/).
 	addr, token := startTestDaemon(t, parentDir)
 
-	// Create a beam ReadEndpoint that simulates a remote source path that
+	// Create a beam Transport that simulates a remote source path that
 	// does NOT exist locally. pathPrefix = Rel("/nonexistent-beam-test",
 	// "/nonexistent-beam-test/data") = "data", which the daemon resolves
 	// to parentDir/data/.
-	srcEP := dialBeamReadEndpointCustomRoots(t, addr, token,
-		"/nonexistent-beam-test/data", "/nonexistent-beam-test")
+	srcConn := dialBeamTransportCustomRoots(t, addr, token, "/nonexistent-beam-test")
 
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:     []string{"/nonexistent-beam-test/data/"},
-		Dst:         dstDir,
-		Archive:     true,
-		Recursive:   true,
-		Workers:     2,
-		Events:      drainEvents(t),
-		SrcEndpoint: srcEP,
+		Sources:      []string{"/nonexistent-beam-test/data/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Events:       drainEvents(t),
+		SrcTransport: srcConn,
+		DstTransport: transport.NewLocalTransport(),
 	})
 
 	require.NoError(t, result.Err)
@@ -129,18 +140,18 @@ func TestIntegration_BeamToBeam(t *testing.T) {
 	srcAddr, srcToken := startTestDaemon(t, srcDir)
 	dstAddr, dstToken := startTestDaemon(t, dstDir)
 
-	srcEP := dialBeamReadEndpoint(t, srcAddr, srcToken, srcDir)
-	dstEP := dialBeamWriteEndpoint(t, dstAddr, dstToken, dstDir)
+	srcConn := dialBeamTransport(t, srcAddr, srcToken, srcDir)
+	dstConn := dialBeamTransport(t, dstAddr, dstToken, dstDir)
 
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:     []string{srcDir + "/"},
-		Dst:         dstDir,
-		Archive:     true,
-		Recursive:   true,
-		Workers:     2,
-		Events:      drainEvents(t),
-		SrcEndpoint: srcEP,
-		DstEndpoint: dstEP,
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Events:       drainEvents(t),
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -161,17 +172,18 @@ func TestIntegration_LocalToBeam_Delta(t *testing.T) {
 	createModifiedTestTree(t, srcDir)
 
 	addr, token := startTestDaemon(t, dstDir)
-	dstEP := dialBeamWriteEndpoint(t, addr, token, dstDir)
+	dstConn := dialBeamTransport(t, addr, token, dstDir)
 
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:     []string{srcDir + "/"},
-		Dst:         dstDir,
-		Archive:     true,
-		Recursive:   true,
-		Workers:     2,
-		Events:      drainEvents(t),
-		DstEndpoint: dstEP,
-		Delta:       true,
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Events:       drainEvents(t),
+		SrcTransport: transport.NewLocalTransport(),
+		DstTransport: dstConn,
+		Delta:        true,
 	})
 
 	require.NoError(t, result.Err)
@@ -190,17 +202,18 @@ func TestIntegration_BeamToLocal_Delta(t *testing.T) {
 	createTestTree(t, dstDir)
 
 	addr, token := startTestDaemon(t, srcDir)
-	srcEP := dialBeamReadEndpoint(t, addr, token, srcDir)
+	srcConn := dialBeamTransport(t, addr, token, srcDir)
 
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:     []string{srcDir + "/"},
-		Dst:         dstDir,
-		Archive:     true,
-		Recursive:   true,
-		Workers:     2,
-		Events:      drainEvents(t),
-		SrcEndpoint: srcEP,
-		Delta:       true,
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Events:       drainEvents(t),
+		SrcTransport: srcConn,
+		DstTransport: transport.NewLocalTransport(),
+		Delta:        true,
 	})
 
 	require.NoError(t, result.Err)
@@ -218,19 +231,19 @@ func TestIntegration_BeamToBeam_Delta(t *testing.T) {
 
 	srcAddr, srcToken := startTestDaemon(t, srcDir)
 	dstAddr, dstToken := startTestDaemon(t, dstDir)
-	srcEP := dialBeamReadEndpoint(t, srcAddr, srcToken, srcDir)
-	dstEP := dialBeamWriteEndpoint(t, dstAddr, dstToken, dstDir)
+	srcConn := dialBeamTransport(t, srcAddr, srcToken, srcDir)
+	dstConn := dialBeamTransport(t, dstAddr, dstToken, dstDir)
 
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:     []string{srcDir + "/"},
-		Dst:         dstDir,
-		Archive:     true,
-		Recursive:   true,
-		Workers:     2,
-		Events:      drainEvents(t),
-		SrcEndpoint: srcEP,
-		DstEndpoint: dstEP,
-		Delta:       true,
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Events:       drainEvents(t),
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
+		Delta:        true,
 	})
 
 	require.NoError(t, result.Err)
@@ -260,14 +273,17 @@ func TestIntegration_Delete(t *testing.T) {
 	))
 	require.NoError(t, os.MkdirAll(filepath.Join(dstDir, "stale"), 0o755))
 
+	srcConn, dstConn := localTransports()
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:   []string{srcDir + "/"},
-		Dst:       dstDir,
-		Archive:   true,
-		Recursive: true,
-		Workers:   2,
-		Delete:    true,
-		Events:    drainEvents(t),
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Delete:       true,
+		Events:       drainEvents(t),
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -307,13 +323,16 @@ func TestIntegration_InterruptAndResume(t *testing.T) {
 		}
 	}()
 
+	srcConn1, dstConn1 := localTransports()
 	_ = engine.Run(ctx, engine.Config{
-		Sources:   []string{srcDir + "/"},
-		Dst:       dstDir,
-		Archive:   true,
-		Recursive: true,
-		Workers:   1, // serialize to make cancellation deterministic
-		Events:    evCh,
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      1, // serialize to make cancellation deterministic
+		Events:       evCh,
+		SrcTransport: srcConn1,
+		DstTransport: dstConn1,
 	})
 	close(evCh)
 	<-done
@@ -326,13 +345,16 @@ func TestIntegration_InterruptAndResume(t *testing.T) {
 	verifyExistingFilesMatch(t, srcDir, dstDir)
 
 	// Phase 2: Resume — re-run without cancellation.
+	srcConn2, dstConn2 := localTransports()
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:   []string{srcDir + "/"},
-		Dst:       dstDir,
-		Archive:   true,
-		Recursive: true,
-		Workers:   2,
-		Events:    drainEvents(t),
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Events:       drainEvents(t),
+		SrcTransport: srcConn2,
+		DstTransport: dstConn2,
 	})
 
 	require.NoError(t, result.Err)
@@ -362,13 +384,16 @@ func TestIntegration_SparseFile(t *testing.T) {
 		0o644,
 	))
 
+	srcConn, dstConn := localTransports()
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:   []string{srcDir + "/"},
-		Dst:       dstDir,
-		Archive:   true,
-		Recursive: true,
-		Workers:   2,
-		Events:    drainEvents(t),
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Events:       drainEvents(t),
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -418,13 +443,16 @@ func TestIntegration_Hardlinks(t *testing.T) {
 
 	createHardlinkTree(t, srcDir)
 
+	srcConn, dstConn := localTransports()
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:   []string{srcDir + "/"},
-		Dst:       dstDir,
-		Archive:   true,
-		Recursive: true,
-		Workers:   1, // serialize so the regular copy lands before the hardlink task
-		Events:    drainEvents(t),
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      1, // serialize so the regular copy lands before the hardlink task
+		Events:       drainEvents(t),
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -472,14 +500,17 @@ func TestIntegration_Verify(t *testing.T) {
 
 	// Phase 1: Copy with verification — should pass.
 	evCh, getEvents := collectEvents(t)
+	srcConn, dstConn := localTransports()
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:   []string{srcDir + "/"},
-		Dst:       dstDir,
-		Archive:   true,
-		Recursive: true,
-		Workers:   2,
-		Verify:    true,
-		Events:    evCh,
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Verify:       true,
+		Events:       evCh,
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err, "copy with verify should succeed")
@@ -501,8 +532,8 @@ func TestIntegration_Verify(t *testing.T) {
 	corruptData[0] ^= 0xFF // flip bits in first byte
 	require.NoError(t, os.WriteFile(corruptPath, corruptData, 0o644))
 
-	srcEP := transport.NewLocalReadEndpoint(srcDir)
-	dstEP := transport.NewLocalWriteEndpoint(dstDir)
+	srcEP := transport.NewLocalReader(srcDir)
+	dstEP := transport.NewLocalWriter(dstDir)
 	defer srcEP.Close()
 	defer dstEP.Close()
 
@@ -546,13 +577,16 @@ func TestIntegration_ByteCount_LocalToLocal(t *testing.T) {
 	dstDir := t.TempDir()
 	createTestTree(t, srcDir)
 
+	srcConn, dstConn := localTransports()
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:   []string{srcDir + "/"},
-		Dst:       dstDir,
-		Archive:   true,
-		Recursive: true,
-		Workers:   2,
-		Events:    drainEvents(t),
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Events:       drainEvents(t),
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -572,16 +606,17 @@ func TestIntegration_ByteCount_BeamToLocal(t *testing.T) {
 	createTestTree(t, srcDir)
 
 	addr, token := startTestDaemon(t, srcDir)
-	srcEP := dialBeamReadEndpoint(t, addr, token, srcDir)
+	srcConn := dialBeamTransport(t, addr, token, srcDir)
 
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:     []string{srcDir + "/"},
-		Dst:         dstDir,
-		Archive:     true,
-		Recursive:   true,
-		Workers:     2,
-		Events:      drainEvents(t),
-		SrcEndpoint: srcEP,
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Events:       drainEvents(t),
+		SrcTransport: srcConn,
+		DstTransport: transport.NewLocalTransport(),
 	})
 
 	require.NoError(t, result.Err)
@@ -601,16 +636,17 @@ func TestIntegration_ByteCount_LocalToBeam(t *testing.T) {
 	createTestTree(t, srcDir)
 
 	addr, token := startTestDaemon(t, dstDir)
-	dstEP := dialBeamWriteEndpoint(t, addr, token, dstDir)
+	dstConn := dialBeamTransport(t, addr, token, dstDir)
 
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:     []string{srcDir + "/"},
-		Dst:         dstDir,
-		Archive:     true,
-		Recursive:   true,
-		Workers:     2,
-		Events:      drainEvents(t),
-		DstEndpoint: dstEP,
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Events:       drainEvents(t),
+		SrcTransport: transport.NewLocalTransport(),
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -630,18 +666,18 @@ func TestIntegration_ByteCount_BeamToBeam(t *testing.T) {
 
 	srcAddr, srcToken := startTestDaemon(t, srcDir)
 	dstAddr, dstToken := startTestDaemon(t, dstDir)
-	srcEP := dialBeamReadEndpoint(t, srcAddr, srcToken, srcDir)
-	dstEP := dialBeamWriteEndpoint(t, dstAddr, dstToken, dstDir)
+	srcConn := dialBeamTransport(t, srcAddr, srcToken, srcDir)
+	dstConn := dialBeamTransport(t, dstAddr, dstToken, dstDir)
 
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:     []string{srcDir + "/"},
-		Dst:         dstDir,
-		Archive:     true,
-		Recursive:   true,
-		Workers:     2,
-		Events:      drainEvents(t),
-		SrcEndpoint: srcEP,
-		DstEndpoint: dstEP,
+		Sources:      []string{srcDir + "/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Events:       drainEvents(t),
+		SrcTransport: srcConn,
+		DstTransport: dstConn,
 	})
 
 	require.NoError(t, result.Err)
@@ -671,16 +707,17 @@ func TestIntegration_BeamToLocal_PathEscapePrevented(t *testing.T) {
 	// Simulate a client connecting with loc.Path="/" while daemon root is srcDir.
 	// Without the fix, computePathPrefix("/", srcDir) would produce "../../../..."
 	// which escapes the daemon root. With the fix, it produces "" (daemon root).
-	srcEP := dialBeamReadEndpointCustomRoots(t, addr, token, "/", srcDir)
+	srcConn := dialBeamTransportCustomRoots(t, addr, token, srcDir)
 
 	result := engine.Run(context.Background(), engine.Config{
-		Sources:     []string{"/"},
-		Dst:         dstDir,
-		Archive:     true,
-		Recursive:   true,
-		Workers:     2,
-		Events:      drainEvents(t),
-		SrcEndpoint: srcEP,
+		Sources:      []string{"/"},
+		Dst:          dstDir,
+		Archive:      true,
+		Recursive:    true,
+		Workers:      2,
+		Events:       drainEvents(t),
+		SrcTransport: srcConn,
+		DstTransport: transport.NewLocalTransport(),
 	})
 
 	require.NoError(t, result.Err)
