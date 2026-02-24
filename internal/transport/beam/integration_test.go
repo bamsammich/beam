@@ -53,15 +53,15 @@ func TestBeamToBeamTransfer(t *testing.T) {
 	dstDir := t.TempDir()
 
 	// --- Start source and dest daemons ---
-	srcAddr, srcToken := startTestDaemon(t, srcDir)
-	dstAddr, dstToken := startTestDaemon(t, dstDir)
+	srcAddr, srcAuthOpts := startTestDaemon(t, srcDir)
+	dstAddr, dstAuthOpts := startTestDaemon(t, dstDir)
 
 	// --- Connect to both ---
-	srcMux, _, srcCaps, err := beam.DialBeam(srcAddr, srcToken, proto.ClientTLSConfig(true))
+	srcMux, _, srcCaps, err := beam.DialBeam(srcAddr, srcAuthOpts, proto.ClientTLSConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { srcMux.Close() })
 
-	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstToken, proto.ClientTLSConfig(true))
+	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
@@ -150,9 +150,9 @@ func TestBeamToBeamDeleteSync(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dstDir, "keep.txt"), []byte("keep"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(dstDir, "extra.txt"), []byte("extra"), 0o644))
 
-	dstAddr, dstToken := startTestDaemon(t, dstDir)
+	dstAddr, dstAuthOpts := startTestDaemon(t, dstDir)
 
-	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstToken, proto.ClientTLSConfig(true))
+	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
@@ -195,14 +195,14 @@ func TestBeamToBeamMetadata(t *testing.T) {
 
 	dstDir := t.TempDir()
 
-	srcAddr, srcToken := startTestDaemon(t, srcDir)
-	dstAddr, dstToken := startTestDaemon(t, dstDir)
+	srcAddr, srcAuthOpts := startTestDaemon(t, srcDir)
+	dstAddr, dstAuthOpts := startTestDaemon(t, dstDir)
 
-	srcMux, _, srcCaps, err := beam.DialBeam(srcAddr, srcToken, proto.ClientTLSConfig(true))
+	srcMux, _, srcCaps, err := beam.DialBeam(srcAddr, srcAuthOpts, proto.ClientTLSConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { srcMux.Close() })
 
-	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstToken, proto.ClientTLSConfig(true))
+	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
@@ -240,7 +240,7 @@ func TestBeamToBeamMetadata(t *testing.T) {
 
 // TestBeamEndToEndEngineIntegration uses the actual engine to perform a copy
 // with a beam Writer as destination. This is the closest we can get to
-// what `beam -a /src beam://token@host/dst` does.
+// what `beam -a /src beam://host/dst` does.
 func TestBeamEndToEndEngineIntegration(t *testing.T) {
 	t.Parallel()
 
@@ -254,9 +254,9 @@ func TestBeamEndToEndEngineIntegration(t *testing.T) {
 
 	dstDir := t.TempDir()
 
-	dstAddr, dstToken := startTestDaemon(t, dstDir)
+	dstAddr, dstAuthOpts := startTestDaemon(t, dstDir)
 
-	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstToken, proto.ClientTLSConfig(true))
+	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 

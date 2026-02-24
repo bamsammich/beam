@@ -2,9 +2,7 @@ package main
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/tls"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net"
@@ -23,16 +21,21 @@ var daemonCmd = &cobra.Command{
 	Short: "Run a beam protocol daemon",
 	Long: `Run a beam protocol daemon that serves files over the beam binary protocol.
 
-The daemon listens for TLS connections and authenticates clients using a bearer
-token. By default it generates a random token and writes it (along with the
-listen port) to /etc/beam/daemon.toml so that beam clients connecting over SSH
-can discover and authenticate automatically.
+The daemon listens for TLS connections and authenticates clients using SSH
+public key challenge/response. Each client presents their SSH public key and
+proves ownership by signing a server-generated nonce. The daemon verifies the
+key against the user's ~/.ssh/authorized_keys.
 
-The daemon serves the entire filesystem visible to the running user. Use --root
-to restrict access to a specific directory.
+On successful authentication, the daemon forks a child process running as the
+authenticated user (requires root or CAP_SETUID). Use --no-fork for single-user
+mode (runs as the daemon's own user).
 
-The daemon generates a self-signed TLS certificate by default. Provide
---tls-cert and --tls-key to use your own certificate.`,
+Connection info (port + TLS fingerprint) is written to /etc/beam/daemon.toml so
+that beam clients connecting over SSH can discover and authenticate automatically.
+
+The daemon generates a persistent self-signed TLS certificate on first run,
+stored at /etc/beam/daemon.{crt,key}. Provide --tls-cert and --tls-key to use
+your own certificate.`,
 	SilenceUsage:  true,
 	SilenceErrors: true,
 	RunE:          runDaemon,
@@ -41,18 +44,18 @@ The daemon generates a self-signed TLS certificate by default. Provide
 func init() {
 	daemonCmd.Flags().String("listen", ":9876", "listen address (host:port)")
 	daemonCmd.Flags().String("root", "/", "root directory to serve")
-	daemonCmd.Flags().String("token", "", "authentication token (auto-generated if not set)")
 	daemonCmd.Flags().String("tls-cert", "", "path to TLS certificate file")
 	daemonCmd.Flags().String("tls-key", "", "path to TLS private key file")
+	daemonCmd.Flags().Bool("no-fork", false, "disable fork-per-connection (single-user mode)")
 }
 
-//nolint:revive // cyclomatic: flag parsing + validation + token gen + TLS + discovery — irreducible
+//nolint:revive // cyclomatic: flag parsing + validation + TLS + discovery — irreducible
 func runDaemon(cmd *cobra.Command, _ []string) error {
 	listenAddr, _ := cmd.Flags().GetString("listen")    //nolint:errcheck // flag name is hardcoded
 	root, _ := cmd.Flags().GetString("root")            //nolint:errcheck // flag name is hardcoded
-	token, _ := cmd.Flags().GetString("token")          //nolint:errcheck // flag name is hardcoded
 	tlsCertFile, _ := cmd.Flags().GetString("tls-cert") //nolint:errcheck // flag name is hardcoded
 	tlsKeyFile, _ := cmd.Flags().GetString("tls-key")   //nolint:errcheck // flag name is hardcoded
+	noFork, _ := cmd.Flags().GetBool("no-fork")         //nolint:errcheck // flag name is hardcoded
 
 	// Validate root exists.
 	info, err := os.Stat(root)
@@ -63,28 +66,30 @@ func runDaemon(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("root %q is not a directory", root)
 	}
 
-	// Auto-generate token if not provided.
-	if token == "" {
-		tokenBytes := make([]byte, 32)
-		if _, randErr := rand.Read(tokenBytes); randErr != nil {
-			return fmt.Errorf("generate auth token: %w", randErr)
-		}
-		token = hex.EncodeToString(tokenBytes)
-	}
-
-	cfg := proto.DaemonConfig{
-		ListenAddr: listenAddr,
-		Root:       root,
-		AuthToken:  token,
-	}
-
-	// Load TLS certificate if provided.
+	// Load or generate persistent TLS certificate.
+	var tlsCert tls.Certificate
 	if tlsCertFile != "" && tlsKeyFile != "" {
-		cert, tlsErr := tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
+		var tlsErr error
+		tlsCert, tlsErr = tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
 		if tlsErr != nil {
 			return fmt.Errorf("load TLS certificate: %w", tlsErr)
 		}
-		cfg.TLSCert = &cert
+	} else {
+		// Use persistent cert at default paths (generate on first run).
+		var genErr error
+		tlsCert, _, genErr = proto.LoadOrGenerateCert("", "")
+		if genErr != nil {
+			return fmt.Errorf("TLS cert: %w", genErr)
+		}
+	}
+
+	forkMode := !noFork && os.Getuid() == 0
+
+	cfg := proto.DaemonConfig{
+		TLSCert:    &tlsCert,
+		ListenAddr: listenAddr,
+		Root:       root,
+		ForkMode:   forkMode,
 	}
 
 	// Configure logging.
@@ -92,6 +97,14 @@ func runDaemon(cmd *cobra.Command, _ []string) error {
 		Level: slog.LevelInfo,
 	}))
 	slog.SetDefault(logger)
+
+	if forkMode {
+		slog.Info("fork mode enabled (running as root)")
+	} else if !noFork && os.Getuid() != 0 {
+		slog.Warn(
+			"not running as root; fork-per-connection disabled (all operations run as daemon user)",
+		)
+	}
 
 	daemon, err := proto.NewDaemon(cfg)
 	if err != nil {
@@ -105,8 +118,8 @@ func runDaemon(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("unexpected listener address type: %T", addr)
 	}
 	if err := config.WriteDaemonDiscovery(config.DaemonDiscovery{
-		Token: token,
-		Port:  tcpAddr.Port,
+		Fingerprint: daemon.Fingerprint(),
+		Port:        tcpAddr.Port,
 	}); err != nil {
 		slog.Warn("failed to write daemon discovery file", "error", err)
 	}

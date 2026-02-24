@@ -32,26 +32,19 @@ import (
 //nolint:ireturn // factory returns interface by design
 func transportFor(
 	loc transport.Location,
-	flagToken, sshKeyFile string,
+	authOpts proto.AuthOpts,
+	sshKeyFile string,
 	sshPort int,
 	noBeamSSH bool,
 ) (transport.Transport, error) {
 	if loc.IsBeam() {
-		token := flagToken
-		if token == "" {
-			token = loc.Token
-		}
-		if token == "" {
-			return nil, errors.New(
-				"beam:// requires an authentication token (use --beam-token or beam://token@host/path)",
-			)
-		}
-		return beam.NewTransport(beamAddr(loc), token, proto.ClientTLSConfig(true)), nil
+		return beam.NewTransport(beamAddr(loc), authOpts, proto.ClientTLSConfig()), nil
 	}
 	if loc.IsRemote() {
 		return beam.NewSSHTransport(beam.SSHTransportOpts{
-			Host: loc.Host,
-			User: loc.User,
+			AuthOpts: authOpts,
+			Host:     loc.Host,
+			User:     loc.User,
 			SSHOpts: transport.SSHOpts{
 				Port:    sshPort,
 				KeyFile: sshKeyFile,
@@ -73,6 +66,25 @@ func beamAddr(loc transport.Location) string {
 var version = "dev"
 
 func main() {
+	// Worker mode: re-exec'd child process for fork-per-connection.
+	// Must be checked before cobra to avoid flag conflicts.
+	if len(os.Args) == 2 && os.Args[1] == proto.WorkerModeFlag {
+		logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
+			Level: slog.LevelInfo,
+		}))
+		slog.SetDefault(logger)
+
+		ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+		err := proto.RunWorker(ctx)
+		stop()
+
+		if err != nil {
+			slog.Error("worker failed", "error", err)
+			os.Exit(1) //nolint:gocritic // exitAfterDefer: no defers active at this point
+		}
+		return
+	}
+
 	os.Exit(run())
 }
 
@@ -119,7 +131,8 @@ func run() int {
 		sshPort        int
 		deltaFlag      bool
 		noDelta        bool
-		beamToken      string
+		identityFile   string
+		fingerprint    string
 		bwLimitStr     string
 		logFile        string
 		benchmarkFlag  bool
@@ -179,14 +192,27 @@ func run() int {
 			}
 			dst := dstLoc.Path
 
+			// Build auth opts for beam connections (SSH pubkey auth).
+			needsBeamAuth := srcLocs[0].IsBeam() || srcLocs[0].IsRemote() ||
+				dstLoc.IsBeam() || dstLoc.IsRemote()
+			var authOpts proto.AuthOpts
+			if needsBeamAuth {
+				var authErr error
+				authOpts, authErr = proto.LoadClientAuth("", identityFile)
+				if authErr != nil {
+					slog.Debug("beam auth not available", "error", authErr)
+				}
+				authOpts.Fingerprint = fingerprint
+			}
+
 			// Create connectors for source and destination.
-			srcConn, err := transportFor(srcLocs[0], beamToken, sshKeyFile, sshPort, noBeamSSH)
+			srcConn, err := transportFor(srcLocs[0], authOpts, sshKeyFile, sshPort, noBeamSSH)
 			if err != nil {
 				return fmt.Errorf("source %s: %w", srcLocs[0], err)
 			}
 			defer srcConn.Close()
 
-			dstConn, err := transportFor(dstLoc, beamToken, sshKeyFile, sshPort, noBeamSSH)
+			dstConn, err := transportFor(dstLoc, authOpts, sshKeyFile, sshPort, noBeamSSH)
 			if err != nil {
 				return fmt.Errorf("destination %s: %w", dstLoc, err)
 			}
@@ -507,7 +533,9 @@ func run() int {
 	rootCmd.Flags().BoolVar(&deltaFlag, "delta", true, "use delta transfer for remote copies")
 	rootCmd.Flags().BoolVar(&noDelta, "no-delta", false, "disable delta transfer")
 	rootCmd.Flags().
-		StringVar(&beamToken, "beam-token", "", "authentication token for beam:// connections")
+		StringVarP(&identityFile, "identity", "i", "", "SSH private key file for beam auth (like ssh -i)")
+	rootCmd.Flags().
+		StringVar(&fingerprint, "fingerprint", "", "expected TLS fingerprint for beam:// (SHA256:...)")
 	rootCmd.Flags().
 		StringVar(&bwLimitStr, "bwlimit", "", "bandwidth limit (e.g. 100M, 1G)")
 	rootCmd.Flags().

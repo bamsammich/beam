@@ -3,6 +3,9 @@ package engine_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"os"
 	"path/filepath"
 	"strings"
@@ -11,6 +14,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/bamsammich/beam/internal/event"
 	"github.com/bamsammich/beam/internal/transport"
@@ -112,16 +116,29 @@ func drainEvents(t *testing.T) chan<- event.Event {
 	return ch
 }
 
+// generateTestAuthOpts creates a fresh SSH key pair and returns auth opts.
+func generateTestAuthOpts(t *testing.T) proto.AuthOpts {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	signer, err := ssh.NewSignerFromKey(key)
+	require.NoError(t, err)
+	return proto.AuthOpts{
+		Username: "testuser",
+		Signer:   signer,
+	}
+}
+
 // startTestDaemon starts a beam daemon serving root on a random port.
-// Returns the address and auth token. The daemon is stopped on test cleanup.
-func startTestDaemon(t *testing.T, root string) (addr, token string) {
+// Returns the address and auth opts. The daemon is stopped on test cleanup.
+func startTestDaemon(t *testing.T, root string) (addr string, authOpts proto.AuthOpts) {
 	t.Helper()
 
-	token = "integration-test-token"
+	authOpts = generateTestAuthOpts(t)
 	daemon, err := proto.NewDaemon(proto.DaemonConfig{
 		ListenAddr: "127.0.0.1:0",
 		Root:       root,
-		AuthToken:  token,
+		KeyChecker: func(_ string, _ ssh.PublicKey) bool { return true },
 	})
 	require.NoError(t, err)
 
@@ -130,17 +147,19 @@ func startTestDaemon(t *testing.T, root string) (addr, token string) {
 
 	go func() { _ = daemon.Serve(ctx) }() //nolint:errcheck // test daemon; error not needed
 
-	return daemon.Addr().String(), token
+	return daemon.Addr().String(), authOpts
 }
 
 // dialBeamTransport dials a beam daemon and returns a Transport.
 // The underlying mux is closed on test cleanup.
 //
 //nolint:ireturn // test helper returns Transport
-func dialBeamTransport(t *testing.T, addr, token, root string) transport.Transport {
+func dialBeamTransport(
+	t *testing.T, addr string, authOpts proto.AuthOpts, root string,
+) transport.Transport {
 	t.Helper()
 
-	mux, _, caps, err := beam.DialBeam(addr, token, proto.ClientTLSConfig(true))
+	mux, _, caps, err := beam.DialBeam(addr, authOpts, proto.ClientTLSConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 
@@ -155,11 +174,11 @@ func dialBeamTransport(t *testing.T, addr, token, root string) transport.Transpo
 //nolint:ireturn // test helper returns Transport
 func dialBeamTransportCustomRoots(
 	t *testing.T,
-	addr, token, daemonRoot string,
+	addr string, authOpts proto.AuthOpts, daemonRoot string,
 ) transport.Transport {
 	t.Helper()
 
-	mux, _, caps, err := beam.DialBeam(addr, token, proto.ClientTLSConfig(true))
+	mux, _, caps, err := beam.DialBeam(addr, authOpts, proto.ClientTLSConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 

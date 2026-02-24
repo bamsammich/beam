@@ -57,8 +57,8 @@ func TestIntegration_LocalToBeam(t *testing.T) {
 	createTestTree(t, srcDir)
 
 	// Start a beam daemon serving dstDir.
-	addr, token := startTestDaemon(t, dstDir)
-	dstConn := dialBeamTransport(t, addr, token, dstDir)
+	addr, authOpts := startTestDaemon(t, dstDir)
+	dstConn := dialBeamTransport(t, addr, authOpts, dstDir)
 
 	result := engine.Run(context.Background(), engine.Config{
 		Sources:      []string{srcDir + "/"},
@@ -103,13 +103,13 @@ func TestIntegration_BeamToLocal_NonLocalPath(t *testing.T) {
 	dstDir := t.TempDir()
 
 	// Start daemon serving parentDir (data lives at parentDir/data/).
-	addr, token := startTestDaemon(t, parentDir)
+	addr, authOpts := startTestDaemon(t, parentDir)
 
 	// Create a beam Transport that simulates a remote source path that
 	// does NOT exist locally. pathPrefix = Rel("/nonexistent-beam-test",
 	// "/nonexistent-beam-test/data") = "data", which the daemon resolves
 	// to parentDir/data/.
-	srcConn := dialBeamTransportCustomRoots(t, addr, token, "/nonexistent-beam-test")
+	srcConn := dialBeamTransportCustomRoots(t, addr, authOpts, "/nonexistent-beam-test")
 
 	result := engine.Run(context.Background(), engine.Config{
 		Sources:      []string{"/nonexistent-beam-test/data/"},
@@ -171,8 +171,8 @@ func TestIntegration_LocalToBeam_Delta(t *testing.T) {
 	// Create modified source.
 	createModifiedTestTree(t, srcDir)
 
-	addr, token := startTestDaemon(t, dstDir)
-	dstConn := dialBeamTransport(t, addr, token, dstDir)
+	addr, authOpts := startTestDaemon(t, dstDir)
+	dstConn := dialBeamTransport(t, addr, authOpts, dstDir)
 
 	result := engine.Run(context.Background(), engine.Config{
 		Sources:      []string{srcDir + "/"},
@@ -201,8 +201,8 @@ func TestIntegration_BeamToLocal_Delta(t *testing.T) {
 	// Pre-populate local dst with old version.
 	createTestTree(t, dstDir)
 
-	addr, token := startTestDaemon(t, srcDir)
-	srcConn := dialBeamTransport(t, addr, token, srcDir)
+	addr, authOpts := startTestDaemon(t, srcDir)
+	srcConn := dialBeamTransport(t, addr, authOpts, srcDir)
 
 	result := engine.Run(context.Background(), engine.Config{
 		Sources:      []string{srcDir + "/"},
@@ -605,8 +605,8 @@ func TestIntegration_ByteCount_BeamToLocal(t *testing.T) {
 	dstDir := t.TempDir()
 	createTestTree(t, srcDir)
 
-	addr, token := startTestDaemon(t, srcDir)
-	srcConn := dialBeamTransport(t, addr, token, srcDir)
+	addr, authOpts := startTestDaemon(t, srcDir)
+	srcConn := dialBeamTransport(t, addr, authOpts, srcDir)
 
 	result := engine.Run(context.Background(), engine.Config{
 		Sources:      []string{srcDir + "/"},
@@ -635,8 +635,8 @@ func TestIntegration_ByteCount_LocalToBeam(t *testing.T) {
 	dstDir := t.TempDir()
 	createTestTree(t, srcDir)
 
-	addr, token := startTestDaemon(t, dstDir)
-	dstConn := dialBeamTransport(t, addr, token, dstDir)
+	addr, authOpts := startTestDaemon(t, dstDir)
+	dstConn := dialBeamTransport(t, addr, authOpts, dstDir)
 
 	result := engine.Run(context.Background(), engine.Config{
 		Sources:      []string{srcDir + "/"},
@@ -702,12 +702,12 @@ func TestIntegration_BeamToLocal_PathEscapePrevented(t *testing.T) {
 	createTestTree(t, srcDir)
 
 	// Start daemon serving srcDir (a specific subdirectory).
-	addr, token := startTestDaemon(t, srcDir)
+	addr, authOpts := startTestDaemon(t, srcDir)
 
 	// Simulate a client connecting with loc.Path="/" while daemon root is srcDir.
 	// Without the fix, computePathPrefix("/", srcDir) would produce "../../../..."
 	// which escapes the daemon root. With the fix, it produces "" (daemon root).
-	srcConn := dialBeamTransportCustomRoots(t, addr, token, srcDir)
+	srcConn := dialBeamTransportCustomRoots(t, addr, authOpts, srcDir)
 
 	result := engine.Run(context.Background(), engine.Config{
 		Sources:      []string{"/"},

@@ -3,6 +3,9 @@ package beam_test
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,21 +14,36 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/crypto/ssh"
 
 	"github.com/bamsammich/beam/internal/transport"
 	"github.com/bamsammich/beam/internal/transport/beam"
 	"github.com/bamsammich/beam/internal/transport/proto"
 )
 
+// generateTestAuthOpts creates a fresh SSH key pair and returns auth opts.
+func generateTestAuthOpts(t *testing.T) proto.AuthOpts {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	signer, err := ssh.NewSignerFromKey(key)
+	require.NoError(t, err)
+	return proto.AuthOpts{
+		Username: "testuser",
+		Signer:   signer,
+	}
+}
+
 // startTestDaemon starts a daemon on a random port and returns connect info.
-func startTestDaemon(t *testing.T, root string) (addr, token string) {
+func startTestDaemon(t *testing.T, root string) (addr string, authOpts proto.AuthOpts) {
 	t.Helper()
 
-	token = "test-token-123"
+	authOpts = generateTestAuthOpts(t)
+
 	daemon, err := proto.NewDaemon(proto.DaemonConfig{
 		ListenAddr: "127.0.0.1:0",
 		Root:       root,
-		AuthToken:  token,
+		KeyChecker: func(_ string, _ ssh.PublicKey) bool { return true },
 	})
 	require.NoError(t, err)
 
@@ -34,7 +52,7 @@ func startTestDaemon(t *testing.T, root string) (addr, token string) {
 
 	go daemon.Serve(ctx) //nolint:errcheck // test daemon; error not needed
 
-	return daemon.Addr().String(), token
+	return daemon.Addr().String(), authOpts
 }
 
 func dialTestEndpoints(
@@ -43,9 +61,9 @@ func dialTestEndpoints(
 ) (*beam.Reader, *beam.Writer) {
 	t.Helper()
 
-	addr, token := startTestDaemon(t, root)
+	addr, authOpts := startTestDaemon(t, root)
 
-	mux, _, caps, err := beam.DialBeam(addr, token, proto.ClientTLSConfig(true))
+	mux, _, caps, err := beam.DialBeam(addr, authOpts, proto.ClientTLSConfig())
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 
@@ -253,14 +271,26 @@ func TestBeamEndpointCaps(t *testing.T) {
 	assert.True(t, caps.AtomicRename)
 }
 
-func TestDialBeamWrongToken(t *testing.T) {
+func TestDialBeamAuthRejected(t *testing.T) {
 	t.Parallel()
 
 	dir := t.TempDir()
-	addr, _ := startTestDaemon(t, dir)
 
-	_, _, _, err := beam.DialBeam(addr, "wrong-token", proto.ClientTLSConfig(true))
-	assert.Error(t, err, "expected error from wrong token, got nil")
+	// Start daemon that rejects all keys.
+	daemon, err := proto.NewDaemon(proto.DaemonConfig{
+		ListenAddr: "127.0.0.1:0",
+		Root:       dir,
+		KeyChecker: func(_ string, _ ssh.PublicKey) bool { return false },
+	})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	go daemon.Serve(ctx) //nolint:errcheck // test daemon
+
+	authOpts := generateTestAuthOpts(t)
+	_, _, _, dialErr := beam.DialBeam(daemon.Addr().String(), authOpts, proto.ClientTLSConfig())
+	assert.Error(t, dialErr, "expected error from rejected auth, got nil")
 }
 
 // makeUniqueContent creates a byte slice where each block has unique content.

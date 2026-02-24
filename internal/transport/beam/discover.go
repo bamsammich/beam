@@ -42,11 +42,14 @@ func ReadRemoteDaemonDiscovery(sshClient *ssh.Client) (config.DaemonDiscovery, e
 
 // DialBeamTunnel establishes a beam protocol connection tunneled through an
 // existing SSH connection. It dials the daemon on localhost:<port> via SSH TCP
-// forwarding, wraps with TLS (self-signed), and performs the beam handshake.
+// forwarding, wraps with TLS, verifies fingerprint from discovery, and
+// performs SSH pubkey auth.
 //
 //nolint:revive // function-result-limit: matches DialBeam/DialBeamConn signature
 func DialBeamTunnel(
-	sshClient *ssh.Client, discovery config.DaemonDiscovery,
+	sshClient *ssh.Client,
+	discovery config.DaemonDiscovery,
+	authOpts proto.AuthOpts,
 ) (*proto.Mux, string, transport.Capabilities, error) {
 	// Tunnel TCP through SSH to the daemon's localhost port.
 	addr := fmt.Sprintf("localhost:%d", discovery.Port)
@@ -56,27 +59,35 @@ func DialBeamTunnel(
 			fmt.Errorf("ssh tunnel to daemon port %d: %w", discovery.Port, err)
 	}
 
-	// Wrap with TLS (self-signed cert, so skip verify).
-	tlsConn := tls.Client(tunnelConn, proto.ClientTLSConfig(true))
+	// Wrap with TLS.
+	tlsConn := tls.Client(tunnelConn, proto.ClientTLSConfig())
 	if err := tlsConn.Handshake(); err != nil {
 		tunnelConn.Close()
 		return nil, "", transport.Capabilities{}, fmt.Errorf("tls handshake over tunnel: %w", err)
 	}
 
-	// Beam protocol handshake.
-	return DialBeamConn(tlsConn, discovery.Token)
+	// Verify fingerprint from discovery file (trusted because read over SSH).
+	if discovery.Fingerprint != "" {
+		if fpErr := proto.VerifyFingerprint(tlsConn, discovery.Fingerprint); fpErr != nil {
+			tlsConn.Close()
+			return nil, "", transport.Capabilities{}, fpErr
+		}
+	}
+
+	// Beam protocol auth.
+	return DialBeamConn(tlsConn, authOpts)
 }
 
 // TryBeamSSHRead attempts to discover a beam daemon on the remote host and
 // connect via SSH tunnel. Returns a Reader if successful, or an error
 // if no daemon is found or connection fails.
-func TryBeamSSHRead(sshClient *ssh.Client, path string) (*Reader, error) {
+func TryBeamSSHRead(sshClient *ssh.Client, path string, authOpts proto.AuthOpts) (*Reader, error) {
 	discovery, err := ReadRemoteDaemonDiscovery(sshClient)
 	if err != nil {
 		return nil, err
 	}
 
-	mux, root, caps, err := DialBeamTunnel(sshClient, discovery)
+	mux, root, caps, err := DialBeamTunnel(sshClient, discovery, authOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -87,13 +98,13 @@ func TryBeamSSHRead(sshClient *ssh.Client, path string) (*Reader, error) {
 // TryBeamSSHWrite attempts to discover a beam daemon on the remote host and
 // connect via SSH tunnel. Returns a Writer if successful, or an error
 // if no daemon is found or connection fails.
-func TryBeamSSHWrite(sshClient *ssh.Client, path string) (*Writer, error) {
+func TryBeamSSHWrite(sshClient *ssh.Client, path string, authOpts proto.AuthOpts) (*Writer, error) {
 	discovery, err := ReadRemoteDaemonDiscovery(sshClient)
 	if err != nil {
 		return nil, err
 	}
 
-	mux, root, caps, err := DialBeamTunnel(sshClient, discovery)
+	mux, root, caps, err := DialBeamTunnel(sshClient, discovery, authOpts)
 	if err != nil {
 		return nil, err
 	}

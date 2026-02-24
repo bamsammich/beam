@@ -3,7 +3,8 @@ package proto
 //go:generate msgp
 
 // Protocol version. Bump only on breaking wire changes.
-const ProtocolVersion = 1
+// Version 2: SSH pubkey auth replaces bearer token auth.
+const ProtocolVersion = 2
 
 // Message type constants for the beam wire protocol.
 // Control messages use stream 0; data messages use worker streams 1+.
@@ -55,14 +56,22 @@ const (
 	MsgApplyDeltaReq        byte = 0x54
 	MsgApplyDeltaResp       byte = 0x55
 
+	// Authentication (stream 0, v2+).
+	MsgAuthReq       byte = 0x40
+	MsgAuthChallenge byte = 0x41
+	MsgAuthResponse  byte = 0x42
+	MsgAuthResult    byte = 0x43
+
 	// Utility.
-	MsgCapsReq   byte = 0x40
-	MsgCapsResp  byte = 0x41
+	MsgCapsReq   byte = 0x48
+	MsgCapsResp  byte = 0x49
 	MsgErrorResp byte = 0xFF
 )
 
 // HandshakeReq is sent by the client on stream 0 after TLS connection.
 type HandshakeReq struct {
+	// AuthToken is retained for wire format stability (v1 compat) but ignored by
+	// protocol v2+ servers, which require the MsgAuthReq challenge/response flow.
 	AuthToken    string   `msg:"auth_token"` //nolint:gosec // G117: field name is descriptive, not a credential leak
 	Capabilities []string `msg:"capabilities"`
 	Version      int      `msg:"version"`
@@ -334,6 +343,30 @@ type WriteFileBatchResult struct {
 // WriteFileBatchResp returns per-file results for a batch write.
 type WriteFileBatchResp struct {
 	Results []WriteFileBatchResult `msg:"results"`
+}
+
+// AuthReq is sent by the client on stream 0 to begin SSH pubkey authentication.
+type AuthReq struct {
+	Username   string `msg:"username"`
+	PubkeyType string `msg:"pubkey_type"`
+	Pubkey     []byte `msg:"pubkey"`
+}
+
+// AuthChallenge is sent by the server with a random nonce for the client to sign.
+type AuthChallenge struct {
+	Nonce []byte `msg:"nonce"` // 32 bytes from crypto/rand
+}
+
+// AuthResponse is sent by the client with the signed nonce.
+type AuthResponse struct {
+	Signature []byte `msg:"signature"` // SSH signature of the nonce
+}
+
+// AuthResult is sent by the server to indicate authentication success or failure.
+type AuthResult struct {
+	Root    string `msg:"root"`    // daemon root path (on success)
+	Message string `msg:"message"` // error message (on failure)
+	OK      bool   `msg:"ok"`
 }
 
 // ErrorResp is a generic error response for any request.
