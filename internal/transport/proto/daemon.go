@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
-	"os/user"
-	"strconv"
 	"sync"
 	"time"
 
@@ -22,9 +20,11 @@ type DaemonConfig struct {
 	// KeyChecker overrides the default authorized_keys validation in
 	// ServerAuth. If set, called instead of checking ~/.ssh/authorized_keys.
 	// Intended for tests.
-	KeyChecker func(username string, pubkey ssh.PublicKey) bool
-	ListenAddr string
-	Root       string
+	KeyChecker  func(username string, pubkey ssh.PublicKey) bool
+	ListenAddr  string
+	Root        string
+	TLSCertPath string // disk path for fork worker to load cert
+	TLSKeyPath  string // disk path for fork worker to load key
 	// ForkMode controls whether the daemon forks a child process per connection
 	// to run as the authenticated user. When false (e.g. in tests or
 	// single-user mode), the daemon handles connections in-process.
@@ -44,6 +44,8 @@ type Daemon struct {
 }
 
 // NewDaemon creates a new beam daemon. Call Serve to start accepting connections.
+//
+//nolint:revive // cognitive-complexity: fork vs in-process listener setup
 func NewDaemon(cfg DaemonConfig) (*Daemon, error) {
 	if cfg.Root == "" {
 		cfg.Root = "/"
@@ -71,14 +73,26 @@ func NewDaemon(cfg DaemonConfig) (*Daemon, error) {
 		slog.Info("generated self-signed TLS certificate", "fingerprint", fingerprint)
 	}
 
-	tlsConfig := &tls.Config{
-		Certificates: []tls.Certificate{tlsCert},
-		MinVersion:   tls.VersionTLS12,
-	}
-
-	listener, err := tls.Listen("tcp", cfg.ListenAddr, tlsConfig)
-	if err != nil {
-		return nil, fmt.Errorf("listen %s: %w", cfg.ListenAddr, err)
+	var listener net.Listener
+	if cfg.ForkMode {
+		// Fork mode: accept raw TCP. The child process handles TLS after
+		// fork so it owns the full TLS session state.
+		var err error
+		listener, err = net.Listen("tcp", cfg.ListenAddr)
+		if err != nil {
+			return nil, fmt.Errorf("listen %s: %w", cfg.ListenAddr, err)
+		}
+	} else {
+		// In-process mode: TLS in the parent.
+		tlsConfig := &tls.Config{
+			Certificates: []tls.Certificate{tlsCert},
+			MinVersion:   tls.VersionTLS12,
+		}
+		var err error
+		listener, err = tls.Listen("tcp", cfg.ListenAddr, tlsConfig)
+		if err != nil {
+			return nil, fmt.Errorf("listen %s: %w", cfg.ListenAddr, err)
+		}
 	}
 
 	auth := NewServerAuth(cfg.Root)
@@ -154,17 +168,34 @@ func (d *Daemon) Serve(ctx context.Context) error {
 	return nil
 }
 
-//nolint:revive // cognitive-complexity: auth + fork/in-process dispatch
 func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	defer conn.Close()
 
 	remoteAddr := conn.RemoteAddr().String()
 	slog.Info("new connection", "remote", remoteAddr)
 
+	if d.cfg.ForkMode {
+		// Fork mode: the connection is raw TCP. Fork immediately so the
+		// child owns the full connection lifecycle (TLS + auth + handler).
+		d.handleFork(conn)
+		return
+	}
+
+	// In-process mode: conn is *tls.Conn from tls.Listen.
 	mux := NewMux(conn)
 
 	// Open control stream before Run so the reader doesn't discard auth frames.
 	controlCh := mux.OpenStream(ControlStream)
+
+	// Set handler before Run so the readLoop never discards frames for
+	// unregistered streams. During auth the client only uses the control
+	// stream (already registered above), so the handler won't fire until
+	// the client sends post-auth requests (e.g. CapsReq).
+	handler := NewHandler(d.readEP, d.writeEP, mux)
+	mux.SetHandler(func(streamID uint32, ch <-chan Frame) {
+		handler.ServeStream(streamID, ch)
+		mux.CloseStream(streamID)
+	})
 
 	var muxWg sync.WaitGroup
 	muxWg.Add(1)
@@ -177,70 +208,45 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	username, err := d.auth.Authenticate(mux, controlCh)
 	if err != nil {
 		slog.Warn("authentication failed", "remote", remoteAddr, "error", err)
-		mux.Close()
+		// Shutdown drains pending writes (e.g. AuthResult{ok:false}) so
+		// the client receives the rejection reason before disconnect.
+		mux.Shutdown()
 		muxWg.Wait()
 		return
 	}
 
 	slog.Info("authenticated", "remote", remoteAddr, "username", username)
 
-	if d.cfg.ForkMode {
-		// Fork a child process running as the authenticated user.
-		d.handleFork(conn, username, mux, &muxWg)
-		return
-	}
-
-	// In-process mode (tests, single-user): run handler directly.
 	d.handleInProcess(ctx, mux, &muxWg, remoteAddr)
 }
 
-func (d *Daemon) handleFork(conn net.Conn, username string, mux *Mux, muxWg *sync.WaitGroup) {
-	// Look up OS user for credential info.
-	u, err := user.Lookup(username)
-	if err != nil {
-		slog.Error("user lookup for fork", "username", username, "error", err)
-		mux.Close()
-		muxWg.Wait()
+func (d *Daemon) handleFork(conn net.Conn) {
+	tcpConn, ok := conn.(*net.TCPConn)
+	if !ok {
+		slog.Error("fork mode requires TCP connection", "type", fmt.Sprintf("%T", conn))
 		return
 	}
 
-	uid, _ := strconv.ParseUint(u.Uid, 10, 32) //nolint:errcheck // validated by user.Lookup
-	gid, _ := strconv.ParseUint(u.Gid, 10, 32) //nolint:errcheck // validated by user.Lookup
-
-	groupIDs, _ := u.GroupIds() //nolint:errcheck // best-effort
-	groups := make([]uint32, 0, len(groupIDs))
-	for _, gidStr := range groupIDs {
-		g, parseErr := strconv.ParseUint(gidStr, 10, 32)
-		if parseErr == nil {
-			groups = append(groups, uint32(g)) //nolint:gosec // G115: bounded by ParseUint
-		}
+	connFile, err := tcpConn.File()
+	if err != nil {
+		slog.Error("get connection file for fork", "error", err)
+		return
 	}
-
-	// Close the mux in the parent — the child will create its own.
-	mux.Close()
-	muxWg.Wait()
+	defer connFile.Close()
 
 	if forkErr := ForkWorker(
-		conn,
-		uint32(uid), //nolint:gosec // G115: bounded by ParseUint
-		uint32(gid), //nolint:gosec // G115: bounded by ParseUint
-		groups,
+		connFile,
 		d.cfg.Root,
+		d.cfg.TLSCertPath,
+		d.cfg.TLSKeyPath,
 	); forkErr != nil {
-		slog.Error("fork worker failed", "username", username, "error", forkErr)
+		slog.Error("fork worker failed", "error", forkErr)
 	}
 }
 
-func (d *Daemon) handleInProcess(
+func (*Daemon) handleInProcess(
 	ctx context.Context, mux *Mux, muxWg *sync.WaitGroup, remoteAddr string,
 ) {
-	handler := NewHandler(d.readEP, d.writeEP, mux)
-
-	mux.SetHandler(func(streamID uint32, ch <-chan Frame) {
-		handler.ServeStream(streamID, ch)
-		mux.CloseStream(streamID)
-	})
-
 	// Wait for mux to finish (connection closed).
 	select {
 	case <-mux.Done():

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/user"
 	"strconv"
 	"sync"
 
@@ -17,39 +18,42 @@ import (
 // run as a beam protocol worker.
 const WorkerModeFlag = "--worker-mode"
 
-// WorkerModeFDEnv is the env var containing the inherited connection file
-// descriptor number (always 3 when passed via ExtraFiles[0]).
-const WorkerModeFDEnv = "BEAM_WORKER_FD"
+// Worker env var names.
+const (
+	// WorkerModeFDEnv is the env var containing the inherited connection file
+	// descriptor number (always 3 when passed via ExtraFiles[0]).
+	WorkerModeFDEnv = "BEAM_WORKER_FD"
 
-// WorkerModeRootEnv is the env var containing the daemon root path.
-const WorkerModeRootEnv = "BEAM_WORKER_ROOT"
+	// WorkerModeRootEnv is the env var containing the daemon root path.
+	WorkerModeRootEnv = "BEAM_WORKER_ROOT"
 
-// extractRawConn gets the underlying *net.TCPConn from a possibly-wrapped
-// connection (e.g. *tls.Conn wrapping a TCP conn).
-func extractRawConn(conn net.Conn) (*net.TCPConn, error) {
-	// Try direct TCP.
-	if tcp, ok := conn.(*net.TCPConn); ok {
-		return tcp, nil
-	}
+	// WorkerModeTLSCertEnv is the env var containing the TLS certificate path.
+	WorkerModeTLSCertEnv = "BEAM_TLS_CERT"
 
-	// TLS wraps the underlying conn — use NetConn() added in Go 1.18.
-	if tlsConn, ok := conn.(*tls.Conn); ok {
-		return extractRawConn(tlsConn.NetConn())
-	}
-
-	return nil, fmt.Errorf("cannot extract TCP conn from %T", conn)
-}
+	// WorkerModeTLSKeyEnv is the env var containing the TLS private key path.
+	WorkerModeTLSKeyEnv = "BEAM_TLS_KEY"
+)
 
 // RunWorker is the entry point for a forked worker child process. It inherits
-// the TLS connection fd from the parent, creates local endpoints as the
-// authenticated user, and runs the beam mux+handler.
+// a raw TCP connection fd from the parent, performs TLS handshake and auth,
+// drops privileges to the authenticated user, then runs the beam mux+handler.
+//
+//nolint:gocyclo,revive // cyclomatic,cognitive-complexity: full connection lifecycle
 func RunWorker(ctx context.Context) error {
 	fdStr := os.Getenv(WorkerModeFDEnv)
 	root := os.Getenv(WorkerModeRootEnv)
+	tlsCertPath := os.Getenv(WorkerModeTLSCertEnv)
+	tlsKeyPath := os.Getenv(WorkerModeTLSKeyEnv)
 
 	if fdStr == "" || root == "" {
 		return fmt.Errorf(
 			"worker mode requires %s and %s env vars", WorkerModeFDEnv, WorkerModeRootEnv,
+		)
+	}
+	if tlsCertPath == "" || tlsKeyPath == "" {
+		return fmt.Errorf(
+			"worker mode requires %s and %s env vars",
+			WorkerModeTLSCertEnv, WorkerModeTLSKeyEnv,
 		)
 	}
 
@@ -58,7 +62,7 @@ func RunWorker(ctx context.Context) error {
 		return fmt.Errorf("invalid fd %q: %w", fdStr, err)
 	}
 
-	// Recover the connection from the inherited fd.
+	// Recover the raw TCP connection from the inherited fd.
 	connFile := os.NewFile(uintptr(fd), "beam-conn") //nolint:gosec // fd from trusted parent
 	if connFile == nil {
 		return fmt.Errorf("invalid file descriptor %d", fd)
@@ -71,28 +75,31 @@ func RunWorker(ctx context.Context) error {
 	}
 	connFile.Close() // FileConn dups the fd; close our copy
 
-	// The connection is already TLS-wrapped by the parent. We use it as-is.
-	conn := rawConn
+	// Load TLS cert and perform handshake — the child owns the TLS session.
+	tlsCert, err := tls.LoadX509KeyPair(tlsCertPath, tlsKeyPath)
+	if err != nil {
+		rawConn.Close()
+		return fmt.Errorf("load TLS cert: %w", err)
+	}
 
-	slog.Info("worker started", //nolint:gosec // G706: env vars are from trusted parent process
+	tlsConfig := &tls.Config{
+		Certificates: []tls.Certificate{tlsCert},
+		MinVersion:   tls.VersionTLS12,
+	}
+	tlsConn := tls.Server(rawConn, tlsConfig)
+	if hsErr := tlsConn.Handshake(); hsErr != nil {
+		tlsConn.Close()
+		return fmt.Errorf("TLS handshake: %w", hsErr)
+	}
+
+	slog.Info("worker TLS handshake complete", //nolint:gosec // G706: env vars from trusted parent
 		"pid", os.Getpid(),
-		"uid", os.Getuid(),
-		"gid", os.Getgid(),
 		"root", root,
 	)
 
-	// Create local endpoints rooted at the daemon root, running as the
-	// authenticated user (kernel enforces permissions).
-	readEP := transport.NewLocalReader(root)
-	writeEP := transport.NewLocalWriter(root)
-
-	mux := NewMux(conn)
-	handler := NewHandler(readEP, writeEP, mux)
-
-	mux.SetHandler(func(streamID uint32, ch <-chan Frame) {
-		handler.ServeStream(streamID, ch)
-		mux.CloseStream(streamID)
-	})
+	// Create mux and authenticate.
+	mux := NewMux(tlsConn)
+	controlCh := mux.OpenStream(ControlStream)
 
 	var muxWg sync.WaitGroup
 	muxWg.Add(1)
@@ -100,6 +107,70 @@ func RunWorker(ctx context.Context) error {
 		defer muxWg.Done()
 		mux.Run() //nolint:errcheck // mux error propagated via closure
 	}()
+
+	auth := NewServerAuth(root)
+	username, err := auth.Authenticate(mux, controlCh)
+	if err != nil {
+		slog.Warn("worker auth failed", "pid", os.Getpid(), "error", err)
+		mux.Shutdown()
+		muxWg.Wait()
+		return fmt.Errorf("authenticate: %w", err)
+	}
+
+	slog.Info( //nolint:gosec // G706: username from auth, not user input
+		"worker authenticated",
+		"pid",
+		os.Getpid(),
+		"username",
+		username,
+	)
+
+	// Look up OS user and drop privileges.
+	u, err := user.Lookup(username)
+	if err != nil {
+		mux.Close()
+		muxWg.Wait()
+		return fmt.Errorf("user lookup %q: %w", username, err)
+	}
+
+	uid, _ := strconv.ParseUint(u.Uid, 10, 32) //nolint:errcheck // validated by user.Lookup
+	gid, _ := strconv.ParseUint(u.Gid, 10, 32) //nolint:errcheck // validated by user.Lookup
+
+	groupIDs, _ := u.GroupIds() //nolint:errcheck // best-effort
+	groups := make([]uint32, 0, len(groupIDs))
+	for _, gidStr := range groupIDs {
+		g, parseErr := strconv.ParseUint(gidStr, 10, 32)
+		if parseErr == nil {
+			groups = append(groups, uint32(g)) //nolint:gosec // G115: bounded by ParseUint
+		}
+	}
+
+	if err := dropPrivileges(
+		uint32(uid), //nolint:gosec // G115: bounded by ParseUint
+		uint32(gid), //nolint:gosec // G115: bounded by ParseUint
+		groups,
+	); err != nil {
+		mux.Close()
+		muxWg.Wait()
+		return fmt.Errorf("drop privileges: %w", err)
+	}
+
+	slog.Info("worker privileges dropped",
+		"pid", os.Getpid(),
+		"uid", os.Getuid(),
+		"gid", os.Getgid(),
+	)
+
+	// Create local endpoints as the authenticated user.
+	readEP := transport.NewLocalReader(root)
+	writeEP := transport.NewLocalWriter(root)
+
+	handler := NewHandler(readEP, writeEP, mux)
+
+	mux.SetHandler(func(streamID uint32, ch <-chan Frame) {
+		handler.ServeStream(streamID, ch)
+		mux.CloseStream(streamID)
+	})
 
 	select {
 	case <-mux.Done():

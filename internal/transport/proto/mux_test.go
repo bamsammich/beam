@@ -203,6 +203,58 @@ func TestMuxUnknownStreamDiscarded(t *testing.T) {
 	wg.Wait()
 }
 
+func TestMuxShutdownDrainsWrites(t *testing.T) {
+	t.Parallel()
+
+	clientConn, serverConn := net.Pipe()
+
+	serverMux := proto.NewMux(serverConn)
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		serverMux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
+	})
+
+	// Queue several frames before calling Shutdown.
+	const numFrames = 5
+	for i := range numFrames {
+		require.NoError(t, serverMux.Send(proto.Frame{
+			StreamID: 1,
+			MsgType:  proto.MsgStatReq,
+			Payload:  []byte{byte(i)},
+		}))
+	}
+
+	// Shutdown should drain all queued frames, then close.
+	done := make(chan struct{})
+	go func() {
+		serverMux.Shutdown()
+		close(done)
+	}()
+
+	// Read frames from the client end — all queued frames should arrive.
+	var received int
+	for range numFrames {
+		f, err := proto.ReadFrame(clientConn)
+		if err != nil {
+			break
+		}
+		assert.Equal(t, uint32(1), f.StreamID)
+		received++
+	}
+	assert.Equal(t, numFrames, received, "all queued frames should be drained before shutdown")
+
+	// Shutdown should complete promptly.
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Shutdown did not complete")
+	}
+
+	clientConn.Close()
+	wg.Wait()
+}
+
 func TestMuxSendAfterClose(t *testing.T) {
 	t.Parallel()
 
