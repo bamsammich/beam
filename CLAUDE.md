@@ -10,148 +10,9 @@
 
 Module path: `github.com/bamsammich/beam`
 
----
+## IMPORTANT
 
-## Technology Stack
-
-| Concern | Choice |
-|---|---|
-| Language | Go |
-| TUI framework | Bubble Tea (`github.com/charmbracelet/bubbletea`) |
-| TUI styling | Lip Gloss (`github.com/charmbracelet/lipgloss`) |
-| CLI parsing | `github.com/spf13/cobra` |
-| Checksums | BLAKE3 (`github.com/zeebo/blake3`) |
-| Rolling hash (delta) | xxHash (`github.com/cespare/xxhash/v2`) |
-| SSH transport | `golang.org/x/crypto/ssh` + `github.com/pkg/sftp` |
-| Wire format | msgpack via `tinylib/msgp` (code-gen, map encoding) |
-| Testing | stdlib `testing` + `testify` |
-
----
-
-## Architecture
-
-### Component Map
-
-```
-cmd/beam/
-  main.go                  — entrypoint, cobra root command
-
-internal/
-  engine/
-    engine.go              — orchestrator, wires connectors into components
-    scanner.go             — parallel directory walker, emits FileTask
-    worker.go              — copy worker pool, consumes FileTask
-    batcher.go             — small-file batch accumulator for beam protocol
-    verify.go              — post-copy BLAKE3 verification pass
-    delete.go              — extraneous file deletion pass
-    sparse.go              — sparse file detection via SEEK_DATA/SEEK_HOLE
-
-  platform/
-    copy_linux.go          — copy_file_range(2), io_uring (build tag: linux)
-    copy_darwin.go         — clonefile(2) for APFS (build tag: darwin)
-    copy_fallback.go       — read/write with large aligned buffers
-
-  transport/
-    transport.go           — Transport, Reader / Writer / ReadWriter interfaces, capability interfaces, FileEntry, Capabilities
-    connector.go           — LocalTransport (local filesystem transport)
-    local.go               — local filesystem endpoints
-    sftp.go                — SSH/SFTP endpoints (with borrowed-connection support)
-    ssh.go                 — SSH connection management
-    delta.go               — rsync-style block matching delta transfer
-    location.go            — user@host:path location parsing
-    beam/
-      connector.go         — beam.Transport (direct beam://), beam.SSHTransport (SSH with beam auto-detect + SFTP fallback)
-      endpoint.go          — beam protocol Reader + Writer (incl. WriteFileBatch)
-      discover.go          — SSH beam daemon auto-detection, tunnel, convenience wrappers
-    proto/
-      daemon.go            — standalone TCP daemon (beam daemon)
-      mux.go               — stream multiplexer over single TLS connection
-      frame.go             — wire frame format (header + payload)
-      messages.go          — msgpack message types (go:generate msgp)
-      messages_gen.go      — generated marshaling code
-      handler.go           — server-side RPC dispatch
-      convert.go           — wire ↔ transport type conversions
-
-  ui/
-    inline.go              — inline progress: ANSI HUD, feed mode, rate mode
-    tui/
-      model.go             — Bubble Tea root model
-      feed.go              — feed view component
-      rate.go              — rate view component (sparkline, worker grid)
-      theme.go             — Catppuccin Mocha color palette
-
-  stats/
-    collector.go           — lock-free stats aggregation (atomic ops)
-    sparkline.go           — rolling throughput ring buffer
-
-  filter/
-    rules.go               — include/exclude glob pattern engine
-```
-
-### Data Flow
-
-```
-[Scanner goroutine pool]
-        │  chan FileTask (buffered, size = 2 × workers)
-        ▼
-[Batcher]  (beam:// only — coalesces small files into batch RPCs)
-        │
-        ▼
-[Worker goroutine pool]  ──→  [Stats Collector]  ──→  [UI renderer]
-        │
-        ▼  (if --verify)
-[Verify goroutine pool]
-```
-
-### Transport Layer
-
-Every parsed location resolves to a `transport.Transport` — the engine accepts transports (not pre-made endpoints) and calls `ReaderAt`/`ReadWriterAt` when it needs endpoints:
-
-- `LocalTransport` — creates fresh local endpoints per call
-- `beam.Transport` — manages a direct `beam://` connection; caches endpoints (shared mux)
-- `beam.SSHTransport` — dials SSH, auto-detects beam daemon, delegates to `beam.Transport` or SFTP fallback
-
-### Capability Interfaces
-
-Optional transport features are discovered via type assertion on endpoints (idiomatic Go optional interface pattern, like `io.WriterTo`):
-
-- `BatchWriter` — batched small-file writes (`WriteFileBatch`)
-- `DeltaSource` — server-side signature/block-matching (`ComputeSignature`, `MatchBlocks`)
-- `DeltaTarget` — server-side delta application (`ComputeSignature`, `ApplyDelta`)
-- `SubtreeWalker` — subtree walking relative to endpoint root (`WalkSubtree`)
-- `PathResolver` — resolve relative paths to absolute filesystem paths (`AbsPath`)
-
-The engine never type-asserts concrete transport types — only these capability interfaces.
-
-### Protocol Backward Compatibility (STRICT)
-
-All beam protocol messages use msgpack map encoding (field names as string keys, NOT positional). New fields MUST be additive with zero-value defaults. Old clients MUST ignore unknown fields. Never remove or rename a field. This rule applies to all types in `internal/transport/proto/messages.go`.
-
-### Batch Small-File RPC
-
-When transferring to a `beam://` destination, small regular files (< 64KB) are accumulated by the batcher into batches of up to 100 files / 4MB total. Each batch is sent as a single `WriteFileBatchReq` RPC (message type 0x33), processed atomically per-file on the server, and returns per-file results in `WriteFileBatchResp` (0x34). This reduces per-file round-trips from 5 to 1/N.
-
-### Path Translation & Destination Index
-
-Beam endpoints translate between client-relative and server-relative paths using a `pathPrefix` computed from the daemon root (obtained during handshake) and the user-specified path. Before scanning, the engine pre-walks the destination via a streaming `Walk` RPC (with subtree support via `WalkReq.RelPath`) and builds a `DstIndex` map for O(1) skip detection, eliminating per-file `Stat` RPCs over the network.
-
-### TCP/Mux Optimizations
-
-- `TCP_NODELAY` is set on all beam connections
-- The mux write loop uses a 64KB `bufio.Writer` that flushes only when the write channel is drained
-- `WriteFrame` combines header + payload into a single `Write()` call
-
----
-
-## Key Design Rules
-
-- **Atomic writes**: Never write directly to the destination path. Always write to `<dest>.<uuid>.beam-tmp`, then `os.Rename`. Crash/ctrl-c never leaves a partial file.
-- **Delta transfer**: Uses xxHash rolling checksums + BLAKE3 strong hash. Block size: `sqrt(filesize)` clamped to [512B, 128KB]. On by default for network transports.
-- **Skip detection**: mtime + size match = skip (same as rsync default).
-- **Batch RPC**: Accessed via `transport.BatchWriter` capability interface type assertion on endpoints. Same pattern as `DeltaSource`/`DeltaTarget` for delta transfer.
-- **One failure doesn't abort a batch**: Server processes each entry independently, returns per-file OK/Error.
-
----
+- ALWAYS load go-project skill
 
 ## Building and Testing
 
@@ -167,32 +28,11 @@ After modifying `internal/transport/proto/messages.go`, regenerate msgp code:
 go generate ./internal/transport/proto/
 ```
 
----
-
-## Current Status
-
-All initial phases are implemented:
-
-- **Phase 1** — Core engine with local copy
-- **Phase 2+3** — Event system, inline UI, filtering, and delete
-- **Phase 4** — BLAKE3 post-copy verification, mtime-based skip detection
-- **Phase 5** — TUI, config system, worker throttle, multi-source support
-- **Phase 6a** — Transport abstraction, SFTP endpoints, SSH auth, push-only delta transfer
-- **Phase 6b** — Custom binary protocol: daemon, `beam://` URL scheme, msgpack wire format, TLS+bearer auth, stream multiplexer, server-side hashing
-- **Phase 6c** — Server-side delta transfer: ComputeSignature/MatchBlocks/ApplyDelta RPCs, push/pull/beam-to-beam delta
-- **Phase 7** — Polish: `--bwlimit`, `--benchmark`, JSON logging, man pages, CI/CD
-- **Batch RPC** — WriteFileBatchReq/Resp for small-file batching, TCP/mux optimizations
-- **Path fix + DstIndex** — Beam endpoint path translation, subtree Walk, pre-built destination index for skip detection
-- **Phase 6d** — SSH beam daemon auto-detection: reads `/etc/beam/daemon.toml` over SFTP, tunnels TLS connection to daemon through SSH, upgrades to beam protocol transparently; `--no-beam-ssh` flag to force SFTP
-- **Transport Factory** — Transport interface + capability interfaces (BatchWriter, DeltaSource, DeltaTarget, SubtreeWalker, PathResolver); beam.Transport, beam.SSHTransport with auto-detect composition; engine decoupled from concrete types
-
 ### Known Issues
 
 - **`--bwlimit` has no effect on local copies.** The kernel fast paths (`copy_file_range`, `sendfile`) bypass userspace entirely, so the `rate.Limiter` wrapping `io.Reader`/`io.Writer` is never hit. Fix: when `--bwlimit` is set, skip the kernel fast path and fall back to the userspace read/write loop where the limiter lives.
 - **VHS demo GIFs need re-recording.** The current inline and TUI demo GIFs complete too fast to show the HUD. Re-record after bwlimit is fixed for local copies, or use a real network transfer between two machines.
 - **`DialBeam`/`DialBeamConn`/`DialBeamTunnel` return 4 values.** This triggers `function-result-limit` lint errors (currently suppressed with `//nolint:revive`). Fix: introduce a `BeamConn` result struct (`Mux *proto.Mux`, `Root string`, `Caps transport.Capabilities`) so all three functions return `(BeamConn, error)`. Update all call sites in `beam/endpoint.go`, `beam/discover.go`, `beam/*_test.go`, and `cmd/beam/main.go`.
-
----
 
 ## Non-Goals (v1)
 
@@ -200,8 +40,6 @@ All initial phases are implemented:
 - Windows support (Linux and macOS only for v1)
 - S3 / object storage transport (transport interface supports future extension)
 - Encryption at rest (transport uses TLS)
-
----
 
 ## Wiki Maintenance
 
