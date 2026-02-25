@@ -49,7 +49,7 @@ func init() {
 	daemonCmd.Flags().Bool("no-fork", false, "disable fork-per-connection (single-user mode)")
 }
 
-//nolint:revive // cyclomatic: flag parsing + validation + TLS + discovery — irreducible
+//nolint:gocyclo,revive // cyclomatic: flag parsing + validation + TLS + discovery — irreducible
 func runDaemon(cmd *cobra.Command, _ []string) error {
 	listenAddr, _ := cmd.Flags().GetString("listen")    //nolint:errcheck // flag name is hardcoded
 	root, _ := cmd.Flags().GetString("root")            //nolint:errcheck // flag name is hardcoded
@@ -66,11 +66,22 @@ func runDaemon(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("root %q is not a directory", root)
 	}
 
+	// Resolve TLS cert/key paths. Fork workers need the disk paths to load
+	// the cert themselves (TLS session state can't cross process boundaries).
+	var tlsCertPath, tlsKeyPath string
+	if tlsCertFile != "" && tlsKeyFile != "" {
+		tlsCertPath = tlsCertFile
+		tlsKeyPath = tlsKeyFile
+	} else {
+		tlsCertPath = proto.DefaultCertPath
+		tlsKeyPath = proto.DefaultKeyPath
+	}
+
 	// Load or generate persistent TLS certificate.
 	var tlsCert tls.Certificate
 	if tlsCertFile != "" && tlsKeyFile != "" {
 		var tlsErr error
-		tlsCert, tlsErr = tls.LoadX509KeyPair(tlsCertFile, tlsKeyFile)
+		tlsCert, tlsErr = tls.LoadX509KeyPair(tlsCertPath, tlsKeyPath)
 		if tlsErr != nil {
 			return fmt.Errorf("load TLS certificate: %w", tlsErr)
 		}
@@ -86,10 +97,12 @@ func runDaemon(cmd *cobra.Command, _ []string) error {
 	forkMode := !noFork && os.Getuid() == 0
 
 	cfg := proto.DaemonConfig{
-		TLSCert:    &tlsCert,
-		ListenAddr: listenAddr,
-		Root:       root,
-		ForkMode:   forkMode,
+		TLSCert:     &tlsCert,
+		TLSCertPath: tlsCertPath,
+		TLSKeyPath:  tlsKeyPath,
+		ListenAddr:  listenAddr,
+		Root:        root,
+		ForkMode:    forkMode,
 	}
 
 	// Configure logging.

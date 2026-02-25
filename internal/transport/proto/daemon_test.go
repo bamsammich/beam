@@ -90,9 +90,15 @@ func TestDaemonAuthRejected(t *testing.T) {
 	mux := proto.NewMux(conn)
 	go mux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
 
-	// Perform pubkey auth — should fail.
+	// Perform pubkey auth — should fail with a descriptive rejection reason,
+	// not "timeout waiting for auth challenge" (which would indicate the
+	// AuthResult frame was lost due to premature connection close).
 	_, authErr := proto.ClientAuth(mux, authOpts)
 	require.Error(t, authErr, "expected auth rejection")
+	assert.Contains(t, authErr.Error(), "public key not authorized",
+		"client should receive the actual rejection reason")
+	assert.NotContains(t, authErr.Error(), "timeout",
+		"should not be a timeout — the AuthResult frame must be delivered")
 
 	mux.Close()
 	cancel()

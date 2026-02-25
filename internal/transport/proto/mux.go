@@ -18,14 +18,15 @@ type StreamHandler func(streamID uint32, ch <-chan Frame)
 // A single reader goroutine dispatches incoming frames to per-stream channels.
 // A single writer goroutine serializes outgoing frames to the connection.
 type Mux struct {
-	conn    net.Conn
-	err     error
-	writeCh chan Frame
-	streams map[uint32]chan Frame
-	handler StreamHandler
-	done    chan struct{}
-	mu      sync.Mutex
-	closed  bool
+	conn       net.Conn
+	err        error
+	writeCh    chan Frame
+	streams    map[uint32]chan Frame
+	handler    StreamHandler
+	done       chan struct{}
+	shutdownCh chan struct{}
+	mu         sync.Mutex
+	closed     bool
 }
 
 // NewMux creates a new multiplexer wrapping the given connection.
@@ -40,10 +41,11 @@ func NewMux(conn net.Conn) *Mux {
 		tc.SetNoDelay(true)
 	}
 	return &Mux{
-		conn:    conn,
-		writeCh: make(chan Frame, 256),
-		streams: make(map[uint32]chan Frame),
-		done:    make(chan struct{}),
+		conn:       conn,
+		writeCh:    make(chan Frame, 256),
+		streams:    make(map[uint32]chan Frame),
+		done:       make(chan struct{}),
+		shutdownCh: make(chan struct{}),
 	}
 }
 
@@ -85,7 +87,18 @@ func (m *Mux) CloseStream(id uint32) {
 }
 
 // Send queues a frame for writing. Returns an error if the mux is closed.
-func (m *Mux) Send(f Frame) error {
+//
+// There is an inherent race between checking m.closed and sending on writeCh:
+// Run() may close writeCh between our check and the channel send. The deferred
+// recover catches the resulting panic without requiring the caller to hold the
+// mutex across the channel operation (which would risk deadlock with writeLoop).
+func (m *Mux) Send(f Frame) (sendErr error) {
+	defer func() {
+		if recover() != nil {
+			sendErr = errors.New("mux closed")
+		}
+	}()
+
 	m.mu.Lock()
 	if m.closed {
 		m.mu.Unlock()
@@ -153,6 +166,22 @@ func (m *Mux) Close() error {
 	return m.conn.Close()
 }
 
+// Shutdown gracefully stops the mux, draining any pending writes before
+// closing. Unlike Close (which drops the connection immediately), Shutdown
+// signals the writeLoop to flush remaining frames, then waits for Run() to
+// complete. This ensures that frames queued via Send (e.g. an AuthResult
+// rejection) reach the peer before the connection is torn down.
+func (m *Mux) Shutdown() {
+	m.mu.Lock()
+	if !m.closed {
+		m.closed = true
+	}
+	m.mu.Unlock()
+
+	close(m.shutdownCh)
+	<-m.done
+}
+
 // Done returns a channel that is closed when the mux has stopped.
 func (m *Mux) Done() <-chan struct{} {
 	return m.done
@@ -198,19 +227,42 @@ func (m *Mux) readLoop() error {
 	}
 }
 
+//nolint:revive // cognitive-complexity: select-in-loop with shutdown handling is inherently branchy
 func (m *Mux) writeLoop() error {
 	bw := bufio.NewWriterSize(m.conn, 64*1024)
-	for f := range m.writeCh {
-		if err := WriteFrame(bw, f); err != nil {
-			return fmt.Errorf("write frame: %w", err)
-		}
-		// Flush when the write channel is drained (no more frames queued),
-		// so we batch multiple frames into fewer TCP segments.
-		if len(m.writeCh) == 0 {
-			if err := bw.Flush(); err != nil {
-				return fmt.Errorf("flush: %w", err)
+	for {
+		select {
+		case f, ok := <-m.writeCh:
+			if !ok {
+				// writeCh closed by Run() — flush and exit.
+				return bw.Flush()
 			}
+			if err := WriteFrame(bw, f); err != nil {
+				return fmt.Errorf("write frame: %w", err)
+			}
+			// Flush when the write channel is drained (no more frames queued),
+			// so we batch multiple frames into fewer TCP segments.
+			if len(m.writeCh) == 0 {
+				if err := bw.Flush(); err != nil {
+					return fmt.Errorf("flush: %w", err)
+				}
+			}
+		case <-m.shutdownCh:
+			return m.drainWrites(bw)
 		}
 	}
-	return bw.Flush()
+}
+
+// drainWrites flushes remaining frames from writeCh during graceful shutdown.
+func (m *Mux) drainWrites(bw *bufio.Writer) error {
+	for {
+		select {
+		case f := <-m.writeCh:
+			if err := WriteFrame(bw, f); err != nil {
+				return fmt.Errorf("write frame: %w", err)
+			}
+		default:
+			return bw.Flush()
+		}
+	}
 }
