@@ -187,6 +187,16 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	// Open control stream before Run so the reader doesn't discard auth frames.
 	controlCh := mux.OpenStream(ControlStream)
 
+	// Set handler before Run so the readLoop never discards frames for
+	// unregistered streams. During auth the client only uses the control
+	// stream (already registered above), so the handler won't fire until
+	// the client sends post-auth requests (e.g. CapsReq).
+	handler := NewHandler(d.readEP, d.writeEP, mux)
+	mux.SetHandler(func(streamID uint32, ch <-chan Frame) {
+		handler.ServeStream(streamID, ch)
+		mux.CloseStream(streamID)
+	})
+
 	var muxWg sync.WaitGroup
 	muxWg.Add(1)
 	go func() {
@@ -234,16 +244,9 @@ func (d *Daemon) handleFork(conn net.Conn) {
 	}
 }
 
-func (d *Daemon) handleInProcess(
+func (*Daemon) handleInProcess(
 	ctx context.Context, mux *Mux, muxWg *sync.WaitGroup, remoteAddr string,
 ) {
-	handler := NewHandler(d.readEP, d.writeEP, mux)
-
-	mux.SetHandler(func(streamID uint32, ch <-chan Frame) {
-		handler.ServeStream(streamID, ch)
-		mux.CloseStream(streamID)
-	})
-
 	// Wait for mux to finish (connection closed).
 	select {
 	case <-mux.Done():
