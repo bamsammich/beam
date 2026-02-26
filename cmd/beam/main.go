@@ -36,9 +36,10 @@ func transportFor(
 	sshKeyFile string,
 	sshPort int,
 	noBeamSSH bool,
+	compress bool,
 ) (transport.Transport, error) {
 	if loc.IsBeam() {
-		return beam.NewTransport(beamAddr(loc), authOpts, proto.ClientTLSConfig()), nil
+		return beam.NewTransport(beamAddr(loc), authOpts, proto.ClientTLSConfig(), compress), nil
 	}
 	if loc.IsRemote() {
 		return beam.NewSSHTransport(beam.SSHTransportOpts{
@@ -49,7 +50,8 @@ func transportFor(
 				Port:    sshPort,
 				KeyFile: sshKeyFile,
 			},
-			NoBeam: noBeamSSH,
+			NoBeam:   noBeamSSH,
+			Compress: compress,
 		}), nil
 	}
 	return transport.NewLocalTransport(), nil
@@ -137,6 +139,7 @@ func run() int {
 		logFile        string
 		benchmarkFlag  bool
 		noBeamSSH      bool
+		noCompress     bool
 	)
 
 	chain := filter.NewChain()
@@ -206,13 +209,27 @@ func run() int {
 			}
 
 			// Create connectors for source and destination.
-			srcConn, err := transportFor(srcLocs[0], authOpts, sshKeyFile, sshPort, noBeamSSH)
+			srcConn, err := transportFor(
+				srcLocs[0],
+				authOpts,
+				sshKeyFile,
+				sshPort,
+				noBeamSSH,
+				!noCompress,
+			)
 			if err != nil {
 				return fmt.Errorf("source %s: %w", srcLocs[0], err)
 			}
 			defer srcConn.Close()
 
-			dstConn, err := transportFor(dstLoc, authOpts, sshKeyFile, sshPort, noBeamSSH)
+			dstConn, err := transportFor(
+				dstLoc,
+				authOpts,
+				sshKeyFile,
+				sshPort,
+				noBeamSSH,
+				!noCompress,
+			)
 			if err != nil {
 				return fmt.Errorf("destination %s: %w", dstLoc, err)
 			}
@@ -544,6 +561,8 @@ func run() int {
 		BoolVar(&benchmarkFlag, "benchmark", false, "measure throughput before copy and auto-tune workers")
 	rootCmd.Flags().
 		BoolVar(&noBeamSSH, "no-beam-ssh", false, "disable beam daemon auto-detection over SSH (force SFTP)")
+	rootCmd.Flags().
+		BoolVar(&noCompress, "no-compress", false, "disable stream compression for beam protocol transfers")
 
 	// Register subcommands.
 	rootCmd.AddCommand(daemonCmd)
