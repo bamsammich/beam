@@ -9,13 +9,19 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
+
+// _sshdPath is the sshd binary used by authorizedKeysPaths.
+// Tests override this to point at a fake script.
+var _sshdPath = "sshd"
 
 const nonceSize = 32
 
@@ -159,7 +165,7 @@ func (sa *ServerAuth) Authenticate(mux *Mux, controlCh <-chan Frame) (string, er
 			sa.sendAuthResult(mux, false, "unknown user", "")
 			return "", fmt.Errorf("user lookup %q: %w", req.Username, lookupErr)
 		}
-		if !isKeyAuthorized(u.HomeDir, pubkey) {
+		if !isKeyAuthorized(u.HomeDir, req.Username, pubkey) {
 			sa.sendAuthResult(mux, false, "public key not authorized", "")
 			return "", fmt.Errorf("key not in authorized_keys for %s", req.Username)
 		}
@@ -233,24 +239,98 @@ func keysEqual(a, b ssh.PublicKey) bool {
 	return bytes.Equal(a.Marshal(), b.Marshal())
 }
 
-// isKeyAuthorized checks if pubkey appears in ~user/.ssh/authorized_keys.
-func isKeyAuthorized(homeDir string, pubkey ssh.PublicKey) bool {
-	authKeysPath := filepath.Join(homeDir, ".ssh", "authorized_keys")
-	f, err := os.Open(authKeysPath)
+// authorizedKeysPaths queries sshd for the effective AuthorizedKeysFile paths
+// for the given username. Falls back to the OpenSSH default if sshd is
+// unavailable or the command fails.
+func authorizedKeysPaths(username string) []string {
+	fallback := []string{".ssh/authorized_keys"}
+
+	//nolint:gosec // G204: username is from an OS user lookup, not untrusted input
+	out, err := exec.Command(_sshdPath, "-T", "-C", "user="+username).Output()
 	if err != nil {
-		slog.Debug("cannot open authorized_keys", "path", authKeysPath, "error", err)
+		slog.Debug("sshd -T failed, using default authorized_keys path", "error", err)
+		return fallback
+	}
+
+	scanner := bufio.NewScanner(bytes.NewReader(out))
+	for scanner.Scan() {
+		line := scanner.Text()
+		key, value, ok := strings.Cut(line, " ")
+		if !ok {
+			continue
+		}
+		if key == "authorizedkeysfile" {
+			paths := strings.Fields(value)
+			if len(paths) == 0 {
+				return fallback
+			}
+			return paths
+		}
+	}
+	return fallback
+}
+
+// expandAuthorizedKeysPath expands OpenSSH tokens (%h, %u, %%) in an
+// AuthorizedKeysFile path and resolves relative paths against homeDir.
+func expandAuthorizedKeysPath(path, homeDir, username string) string {
+	var b strings.Builder
+	b.Grow(len(path))
+
+	for i := 0; i < len(path); i++ {
+		if path[i] == '%' && i+1 < len(path) {
+			switch path[i+1] {
+			case 'h':
+				b.WriteString(homeDir)
+				i++
+			case 'u':
+				b.WriteString(username)
+				i++
+			case '%':
+				b.WriteByte('%')
+				i++
+			default:
+				b.WriteByte(path[i])
+			}
+		} else {
+			b.WriteByte(path[i])
+		}
+	}
+
+	expanded := b.String()
+	if !filepath.IsAbs(expanded) {
+		expanded = filepath.Join(homeDir, expanded)
+	}
+	return expanded
+}
+
+// checkAuthorizedKeysFile scans a single authorized_keys file for pubkey.
+func checkAuthorizedKeysFile(path string, pubkey ssh.PublicKey) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		slog.Debug("cannot open authorized_keys", "path", path, "error", err)
 		return false
 	}
 	defer f.Close()
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
-		line := scanner.Bytes()
-		candidate, _, _, _, parseErr := ssh.ParseAuthorizedKey(line)
+		candidate, _, _, _, parseErr := ssh.ParseAuthorizedKey(scanner.Bytes())
 		if parseErr != nil {
 			continue
 		}
 		if keysEqual(candidate, pubkey) {
+			return true
+		}
+	}
+	return false
+}
+
+// isKeyAuthorized checks if pubkey is listed in any of the sshd-configured
+// authorized_keys files for the given user.
+func isKeyAuthorized(homeDir, username string, pubkey ssh.PublicKey) bool {
+	for _, p := range authorizedKeysPaths(username) {
+		absPath := expandAuthorizedKeysPath(p, homeDir, username)
+		if checkAuthorizedKeysFile(absPath, pubkey) {
 			return true
 		}
 	}
