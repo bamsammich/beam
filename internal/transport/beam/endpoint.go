@@ -67,45 +67,48 @@ func clientPath(prefix, serverRelPath string) string {
 // DefaultPort is the default beam daemon port.
 const DefaultPort = 9876
 
+// Conn holds the results of a successful beam dial.
+type Conn struct {
+	Mux  *proto.Mux
+	Root string
+	Caps transport.Capabilities
+}
+
 // DialBeam connects to a beam daemon over TLS, performs SSH pubkey auth.
-// Returns a running mux, the server root, and capabilities.
-//
-//nolint:revive // function-result-limit: established API returning (mux, root, caps, err)
+// Returns a Conn containing the running mux, server root, and capabilities.
 func DialBeam(
 	addr string,
 	authOpts proto.AuthOpts,
 	tlsConfig *tls.Config,
 	compress bool,
-) (*proto.Mux, string, transport.Capabilities, error) {
+) (Conn, error) {
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", addr, tlsConfig)
 	if err != nil {
-		return nil, "", transport.Capabilities{}, fmt.Errorf("dial %s: %w", addr, err)
+		return Conn{}, fmt.Errorf("dial %s: %w", addr, err)
 	}
 
 	// Verify TLS fingerprint if provided.
 	if authOpts.Fingerprint != "" {
 		if fpErr := proto.VerifyFingerprint(conn, authOpts.Fingerprint); fpErr != nil {
 			conn.Close()
-			return nil, "", transport.Capabilities{}, fpErr
+			return Conn{}, fpErr
 		}
 	}
 
-	return DialBeamConn(conn, authOpts, compress)
+	return DialConn(conn, authOpts, compress)
 }
 
-// DialBeamConn performs beam SSH pubkey auth over an already-established
+// DialConn performs beam SSH pubkey auth over an already-established
 // connection. This is the core auth logic shared by DialBeam (direct TLS)
-// and DialBeamTunnel (SSH-tunneled TLS). Returns a running mux, the server
-// root, and capabilities.
-//
-//nolint:revive // function-result-limit: matches DialBeam signature
-func DialBeamConn(
+// and DialBeamTunnel (SSH-tunneled TLS). Returns a Conn containing the
+// running mux, server root, and capabilities.
+func DialConn(
 	conn net.Conn, authOpts proto.AuthOpts, compress bool,
-) (*proto.Mux, string, transport.Capabilities, error) {
+) (Conn, error) {
 	muxConn, err := proto.NegotiateCompression(conn, compress)
 	if err != nil {
 		conn.Close()
-		return nil, "", transport.Capabilities{}, fmt.Errorf("compression negotiation: %w", err)
+		return Conn{}, fmt.Errorf("compression negotiation: %w", err)
 	}
 
 	mux := proto.NewMux(muxConn)
@@ -117,17 +120,17 @@ func DialBeamConn(
 	root, err := proto.ClientAuth(mux, authOpts)
 	if err != nil {
 		mux.Close()
-		return nil, "", transport.Capabilities{}, fmt.Errorf("auth: %w", err)
+		return Conn{}, fmt.Errorf("auth: %w", err)
 	}
 
 	// Query capabilities.
 	caps, err := queryCaps(mux)
 	if err != nil {
 		mux.Close()
-		return nil, "", transport.Capabilities{}, fmt.Errorf("query capabilities: %w", err)
+		return Conn{}, fmt.Errorf("query capabilities: %w", err)
 	}
 
-	return mux, root, caps, nil
+	return Conn{Mux: mux, Root: root, Caps: caps}, nil
 }
 
 func queryCaps(mux *proto.Mux) (transport.Capabilities, error) {
@@ -551,7 +554,7 @@ func (e *Writer) MkdirAll(relPath string, perm os.FileMode) error {
 	return e.expectAck(ch)
 }
 
-//nolint:ireturn // implements transport.ReadWriter interface; WriteFile is the standard return type
+//nolint:ireturn // TODO: Fix this ireturn lint failure by returning a concrete type
 func (e *Writer) CreateTemp(
 	relPath string,
 	perm os.FileMode,

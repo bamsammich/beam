@@ -63,12 +63,12 @@ func dialTestEndpoints(
 
 	addr, authOpts := startTestDaemon(t, root)
 
-	mux, _, caps, err := beam.DialBeam(addr, authOpts, proto.ClientTLSConfig(), true)
+	bc, err := beam.DialBeam(addr, authOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
-	t.Cleanup(func() { mux.Close() })
+	t.Cleanup(func() { bc.Mux.Close() })
 
-	readEP := beam.NewReader(mux, root, root, caps)
-	writeEP := beam.NewWriter(mux, root, root, caps)
+	readEP := beam.NewReader(bc.Mux, root, root, bc.Caps)
+	writeEP := beam.NewWriter(bc.Mux, root, root, bc.Caps)
 	return readEP, writeEP
 }
 
@@ -289,7 +289,7 @@ func TestDialBeamAuthRejected(t *testing.T) {
 	go daemon.Serve(ctx) //nolint:errcheck // test daemon
 
 	authOpts := generateTestAuthOpts(t)
-	_, _, _, dialErr := beam.DialBeam(
+	_, dialErr := beam.DialBeam(
 		daemon.Addr().String(),
 		authOpts,
 		proto.ClientTLSConfig(),
