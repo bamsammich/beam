@@ -137,6 +137,54 @@ func TestBeamToBeamTransfer(t *testing.T) {
 	}
 }
 
+// TestBeamTransferCompressionOptOut verifies that dialing with compress=false
+// still transfers file content correctly. This confirms the opt-out path works;
+// existing tests cover the compress=true path.
+func TestBeamTransferCompressionOptOut(t *testing.T) {
+	t.Parallel()
+
+	// 1 MB of repeated bytes — highly compressible.
+	const fileSize = 1 << 20
+	srcDir := t.TempDir()
+	srcData := bytes.Repeat([]byte{0xAB}, fileSize)
+	require.NoError(t, os.WriteFile(filepath.Join(srcDir, "compressible.bin"), srcData, 0o644))
+
+	dstDir := t.TempDir()
+
+	srcAddr, srcAuthOpts := startTestDaemon(t, srcDir)
+	dstAddr, dstAuthOpts := startTestDaemon(t, dstDir)
+
+	// Dial with compress=false.
+	srcMux, _, srcCaps, err := beam.DialBeam(srcAddr, srcAuthOpts, proto.ClientTLSConfig(), false)
+	require.NoError(t, err)
+	t.Cleanup(func() { srcMux.Close() })
+
+	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig(), false)
+	require.NoError(t, err)
+	t.Cleanup(func() { dstMux.Close() })
+
+	srcEP := beam.NewReader(srcMux, srcDir, srcDir, srcCaps)
+	dstEP := beam.NewWriter(dstMux, dstDir, dstDir, dstCaps)
+
+	// Transfer the file.
+	rc, err := srcEP.OpenRead("compressible.bin")
+	require.NoError(t, err)
+
+	wf, err := dstEP.CreateTemp("compressible.bin", 0o644)
+	require.NoError(t, err)
+
+	_, err = io.Copy(wf, rc)
+	require.NoError(t, err)
+	require.NoError(t, rc.Close())
+	require.NoError(t, wf.Close())
+	require.NoError(t, dstEP.Rename(wf.Name(), "compressible.bin"))
+
+	// Verify content integrity.
+	dstData, err := os.ReadFile(filepath.Join(dstDir, "compressible.bin"))
+	require.NoError(t, err)
+	assert.Equal(t, srcData, dstData)
+}
+
 // TestBeamToBeamDeleteSync tests that after a beam transfer, we can detect
 // and remove extraneous files on the destination.
 func TestBeamToBeamDeleteSync(t *testing.T) {
