@@ -410,3 +410,67 @@ func TestWorker_MetadataPreservation(t *testing.T) {
 	assert.True(t, dstInfo.ModTime().Equal(modTime),
 		"mtime: got %v, want %v", dstInfo.ModTime(), modTime)
 }
+
+func TestWorker_BWLimitThrottlesLocalCopy(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "src")
+	dst := filepath.Join(dir, "dst")
+	require.NoError(t, os.MkdirAll(src, 0755))
+	require.NoError(t, os.MkdirAll(dst, 0755))
+
+	// 200 KB file at 50 KB/s → ~4s without burst.
+	// Burst is 50 KB (absorbs first chunk), so remaining 150 KB ≈ 3s.
+	// We assert ≥500ms to leave margin.
+	// Rate must be ≥ 32 KB/s so burst accommodates io.Copy's 32 KB buffer.
+	dataSize := 200 * 1024
+	data := make([]byte, dataSize)
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	srcFile := filepath.Join(src, "big.bin")
+	require.NoError(t, os.WriteFile(srcFile, data, 0644))
+	dstFile := filepath.Join(dst, "big.bin")
+
+	bwRate := int64(50 * 1024) // 50 KB/s
+	wp, _ := newTestWorkerPool(t, dst, func(cfg *WorkerConfig) {
+		cfg.BWLimiter = NewBWLimiter(bwRate)
+	})
+
+	tasks := make(chan FileTask, 1)
+	errs := make(chan error, 1)
+
+	info, err := os.Stat(srcFile)
+	require.NoError(t, err)
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	require.True(t, ok)
+
+	tasks <- FileTask{
+		SrcPath: srcFile,
+		DstPath: dstFile,
+		Type:    Regular,
+		Size:    info.Size(),
+		Mode:    uint32(info.Mode()),
+		UID:     stat.Uid,
+		GID:     stat.Gid,
+		ModTime: info.ModTime(),
+		AccTime: time.Now(),
+	}
+	close(tasks)
+
+	start := time.Now()
+	wp.Run(context.Background(), tasks, errs)
+	elapsed := time.Since(start)
+	close(errs)
+
+	for err := range errs {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	got, err := os.ReadFile(dstFile)
+	require.NoError(t, err)
+	assert.Equal(t, data, got)
+
+	// With burst absorbed, 200 KB at 50 KB/s should take well over 500ms.
+	assert.Greater(t, elapsed, 500*time.Millisecond,
+		"BWLimit should throttle local copy; elapsed: %v", elapsed)
+}

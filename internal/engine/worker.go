@@ -430,7 +430,10 @@ func (wp *WorkerPool) copyFileData(
 	tmpFile transport.WriteFile,
 ) (int64, bool, error) {
 	// Local fast-path: extract raw fd for kernel copy offload.
-	if dstFd := transport.LocalFile(tmpFile); dstFd != nil && wp.localFast {
+	// Disabled when BWLimiter is set — kernel paths bypass userspace,
+	// so the rate limiter would never be consulted.
+	dstFd := transport.LocalFile(tmpFile)
+	if dstFd != nil && wp.localFast && wp.cfg.BWLimiter == nil {
 		n, err := wp.copyDataLocal(task, dstFd)
 		return n, false, err
 	}
