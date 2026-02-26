@@ -31,7 +31,6 @@ go generate ./internal/transport/proto/
 ### Known Issues
 
 - **VHS demo GIFs need re-recording.** The current inline and TUI demo GIFs complete too fast to show the HUD. Re-record after bwlimit is fixed for local copies, or use a real network transfer between two machines.
-- **Compression is not content-aware.** zstd stream compression is always applied (unless `--no-compress`) even for already-compressed data (video, images, archives). This wastes CPU for zero wire savings. Fix: add content-aware suppression — sample the first chunk of each stream or detect incompressible file extensions, and skip compression for data that won't benefit.
 
 ## Non-Goals (v1)
 
