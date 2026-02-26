@@ -159,7 +159,7 @@ func dialBeamTransport(
 ) transport.Transport {
 	t.Helper()
 
-	mux, _, caps, err := beam.DialBeam(addr, authOpts, proto.ClientTLSConfig())
+	mux, _, caps, err := beam.DialBeam(addr, authOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 
@@ -178,7 +178,7 @@ func dialBeamTransportCustomRoots(
 ) transport.Transport {
 	t.Helper()
 
-	mux, _, caps, err := beam.DialBeam(addr, authOpts, proto.ClientTLSConfig())
+	mux, _, caps, err := beam.DialBeam(addr, authOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 

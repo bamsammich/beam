@@ -63,7 +63,7 @@ func dialTestEndpoints(
 
 	addr, authOpts := startTestDaemon(t, root)
 
-	mux, _, caps, err := beam.DialBeam(addr, authOpts, proto.ClientTLSConfig())
+	mux, _, caps, err := beam.DialBeam(addr, authOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 
@@ -289,7 +289,12 @@ func TestDialBeamAuthRejected(t *testing.T) {
 	go daemon.Serve(ctx) //nolint:errcheck // test daemon
 
 	authOpts := generateTestAuthOpts(t)
-	_, _, _, dialErr := beam.DialBeam(daemon.Addr().String(), authOpts, proto.ClientTLSConfig())
+	_, _, _, dialErr := beam.DialBeam(
+		daemon.Addr().String(),
+		authOpts,
+		proto.ClientTLSConfig(),
+		true,
+	)
 	assert.Error(t, dialErr, "expected error from rejected auth, got nil")
 }
 

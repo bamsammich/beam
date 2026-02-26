@@ -47,9 +47,12 @@ func TestDaemonAuthSuccess(t *testing.T) {
 
 	// Connect as client.
 	addr := daemon.Addr().String()
-	conn, err := tls.Dial("tcp", addr, proto.ClientTLSConfig())
+	rawConn, err := tls.Dial("tcp", addr, proto.ClientTLSConfig())
 	require.NoError(t, err)
-	defer conn.Close()
+	defer rawConn.Close()
+
+	conn, err := proto.NegotiateCompression(rawConn, false)
+	require.NoError(t, err)
 
 	mux := proto.NewMux(conn)
 	go mux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
@@ -83,9 +86,12 @@ func TestDaemonAuthRejected(t *testing.T) {
 
 	// Connect as client.
 	addr := daemon.Addr().String()
-	conn, err := tls.Dial("tcp", addr, proto.ClientTLSConfig())
+	rawConn, err := tls.Dial("tcp", addr, proto.ClientTLSConfig())
 	require.NoError(t, err)
-	defer conn.Close()
+	defer rawConn.Close()
+
+	conn, err := proto.NegotiateCompression(rawConn, false)
+	require.NoError(t, err)
 
 	mux := proto.NewMux(conn)
 	go mux.Run() //nolint:errcheck // mux.Run error propagated via mux closure

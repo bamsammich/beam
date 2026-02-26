@@ -97,8 +97,15 @@ func RunWorker(ctx context.Context) error {
 		"root", root,
 	)
 
+	// Negotiate compression before starting the mux.
+	muxConn, err := AcceptCompression(tlsConn)
+	if err != nil {
+		tlsConn.Close()
+		return fmt.Errorf("compression negotiation: %w", err)
+	}
+
 	// Create mux and authenticate.
-	mux := NewMux(tlsConn)
+	mux := NewMux(muxConn)
 	controlCh := mux.OpenStream(ControlStream)
 
 	var muxWg sync.WaitGroup
