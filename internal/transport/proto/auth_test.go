@@ -65,9 +65,12 @@ func TestAuthWrongKeyRejected(t *testing.T) {
 	defer cancel()
 
 	// Client presents pubkeyA (not authorized) with signerA.
-	conn, err := tls.Dial("tcp", addr, proto.ClientTLSConfig())
+	rawConn, err := tls.Dial("tcp", addr, proto.ClientTLSConfig())
 	require.NoError(t, err)
-	defer conn.Close()
+	defer rawConn.Close()
+
+	conn, err := proto.NegotiateCompression(rawConn, false)
+	require.NoError(t, err)
 
 	mux := proto.NewMux(conn)
 	go mux.Run() //nolint:errcheck // test mux; error propagated via closure
@@ -104,9 +107,12 @@ func TestAuthWrongSignatureRejected(t *testing.T) {
 		signer: signerB,
 	}
 
-	conn, err := tls.Dial("tcp", addr, proto.ClientTLSConfig())
+	rawConn, err := tls.Dial("tcp", addr, proto.ClientTLSConfig())
 	require.NoError(t, err)
-	defer conn.Close()
+	defer rawConn.Close()
+
+	conn, err := proto.NegotiateCompression(rawConn, false)
+	require.NoError(t, err)
 
 	mux := proto.NewMux(conn)
 	go mux.Run() //nolint:errcheck // test mux; error propagated via closure
@@ -160,12 +166,18 @@ func TestAuthConcurrentClients(t *testing.T) {
 
 	for i := range numClients {
 		wg.Go(func() {
-			conn, dialErr := tls.Dial("tcp", addr, proto.ClientTLSConfig())
+			rawConn, dialErr := tls.Dial("tcp", addr, proto.ClientTLSConfig())
 			if dialErr != nil {
 				errs[i] = dialErr
 				return
 			}
-			defer conn.Close()
+			defer rawConn.Close()
+
+			conn, negErr := proto.NegotiateCompression(rawConn, false)
+			if negErr != nil {
+				errs[i] = negErr
+				return
+			}
 
 			mux := proto.NewMux(conn)
 			go mux.Run() //nolint:errcheck // test mux; error propagated via closure
@@ -205,9 +217,12 @@ func TestAuthSuccessReturnsRoot(t *testing.T) {
 
 	go daemon.Serve(ctx) //nolint:errcheck // test daemon; error not needed
 
-	conn, err := tls.Dial("tcp", daemon.Addr().String(), proto.ClientTLSConfig())
+	rawConn, err := tls.Dial("tcp", daemon.Addr().String(), proto.ClientTLSConfig())
 	require.NoError(t, err)
-	defer conn.Close()
+	defer rawConn.Close()
+
+	conn, err := proto.NegotiateCompression(rawConn, false)
+	require.NoError(t, err)
 
 	mux := proto.NewMux(conn)
 	go mux.Run() //nolint:errcheck // test mux; error propagated via closure
@@ -234,9 +249,12 @@ func TestAuthUsernamePassedToChecker(t *testing.T) {
 	})
 	defer cancel()
 
-	conn, err := tls.Dial("tcp", addr, proto.ClientTLSConfig())
+	rawConn, err := tls.Dial("tcp", addr, proto.ClientTLSConfig())
 	require.NoError(t, err)
-	defer conn.Close()
+	defer rawConn.Close()
+
+	conn, err := proto.NegotiateCompression(rawConn, false)
+	require.NoError(t, err)
 
 	mux := proto.NewMux(conn)
 	go mux.Run() //nolint:errcheck // test mux; error propagated via closure

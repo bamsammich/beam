@@ -182,6 +182,12 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 	}
 
 	// In-process mode: conn is *tls.Conn from tls.Listen.
+	conn, err := AcceptCompression(conn)
+	if err != nil {
+		slog.Warn("compression negotiation failed", "remote", remoteAddr, "error", err)
+		return
+	}
+
 	mux := NewMux(conn)
 
 	// Open control stream before Run so the reader doesn't discard auth frames.
