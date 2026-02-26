@@ -15,3 +15,4 @@
 | 2026-02-24 | [Zero-config daemon with auto-token discovery](20260224_zero_config_daemon.md) | — |
 | 2026-02-24 | [SSH beam auto-detection with transparent upgrade](20260224_ssh_beam_auto_detection.md) | — |
 | 2026-02-24 | [TLS fingerprint pinning + SSH pubkey auth + fork-per-connection](20260224_tls_pubkey_auth_fork.md) | `20260224_zero_config_daemon.md` |
+| 2026-02-25 | [Per-connection zstd stream compression negotiated via pre-mux byte exchange](20260225_per_connection_zstd_compression.md) | — |
