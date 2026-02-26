@@ -35,22 +35,29 @@ func TestDialBeamConn(t *testing.T) {
 	// Create a net.Pipe — bidirectional in-memory connection.
 	clientConn, serverConn := net.Pipe()
 
-	// Start the server side: create mux, handler, and auth listener.
+	// Start the server side in a goroutine: accept compression, create mux,
+	// handler, and auth listener. Must be concurrent because net.Pipe
+	// requires both sides to be running for the compression handshake.
 	readEP := transport.NewLocalReader(dir)
 	writeEP := transport.NewLocalWriter(dir)
-	serverMux := proto.NewMux(serverConn)
-	handler := proto.NewHandler(readEP, writeEP, serverMux)
 
-	controlCh := serverMux.OpenStream(proto.ControlStream)
-	serverMux.SetHandler(func(streamID uint32, ch <-chan proto.Frame) {
-		handler.ServeStream(streamID, ch)
-		serverMux.CloseStream(streamID)
-	})
-
-	go serverMux.Run() //nolint:errcheck // test server; error not needed
-
-	// Run a pubkey auth flow on the server side.
 	go func() {
+		muxConn, accErr := proto.AcceptCompression(serverConn)
+		if accErr != nil {
+			serverConn.Close()
+			return
+		}
+		serverMux := proto.NewMux(muxConn)
+		handler := proto.NewHandler(readEP, writeEP, serverMux)
+
+		controlCh := serverMux.OpenStream(proto.ControlStream)
+		serverMux.SetHandler(func(streamID uint32, ch <-chan proto.Frame) {
+			handler.ServeStream(streamID, ch)
+			serverMux.CloseStream(streamID)
+		})
+
+		go serverMux.Run() //nolint:errcheck // test server; error not needed
+
 		defer serverMux.Close()
 
 		// Use ServerAuth with a key checker that accepts the test key.
@@ -68,7 +75,7 @@ func TestDialBeamConn(t *testing.T) {
 	}()
 
 	// Client side: DialBeamConn over the pipe.
-	mux, root, caps, err := beam.DialBeamConn(clientConn, authOpts)
+	mux, root, caps, err := beam.DialBeamConn(clientConn, authOpts, false)
 	require.NoError(t, err)
 	t.Cleanup(func() { mux.Close() })
 

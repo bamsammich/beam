@@ -75,6 +75,7 @@ func DialBeam(
 	addr string,
 	authOpts proto.AuthOpts,
 	tlsConfig *tls.Config,
+	compress bool,
 ) (*proto.Mux, string, transport.Capabilities, error) {
 	conn, err := tls.DialWithDialer(&net.Dialer{Timeout: 10 * time.Second}, "tcp", addr, tlsConfig)
 	if err != nil {
@@ -89,7 +90,7 @@ func DialBeam(
 		}
 	}
 
-	return DialBeamConn(conn, authOpts)
+	return DialBeamConn(conn, authOpts, compress)
 }
 
 // DialBeamConn performs beam SSH pubkey auth over an already-established
@@ -99,8 +100,14 @@ func DialBeam(
 //
 //nolint:revive // function-result-limit: matches DialBeam signature
 func DialBeamConn(
-	conn net.Conn, authOpts proto.AuthOpts,
+	conn net.Conn, authOpts proto.AuthOpts, compress bool,
 ) (*proto.Mux, string, transport.Capabilities, error) {
+	conn, err := proto.NegotiateCompression(conn, compress)
+	if err != nil {
+		conn.Close()
+		return nil, "", transport.Capabilities{}, fmt.Errorf("compression negotiation: %w", err)
+	}
+
 	mux := proto.NewMux(conn)
 
 	// Start mux in background.

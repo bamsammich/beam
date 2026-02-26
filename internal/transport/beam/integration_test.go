@@ -57,11 +57,11 @@ func TestBeamToBeamTransfer(t *testing.T) {
 	dstAddr, dstAuthOpts := startTestDaemon(t, dstDir)
 
 	// --- Connect to both ---
-	srcMux, _, srcCaps, err := beam.DialBeam(srcAddr, srcAuthOpts, proto.ClientTLSConfig())
+	srcMux, _, srcCaps, err := beam.DialBeam(srcAddr, srcAuthOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
 	t.Cleanup(func() { srcMux.Close() })
 
-	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig())
+	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
@@ -152,7 +152,7 @@ func TestBeamToBeamDeleteSync(t *testing.T) {
 
 	dstAddr, dstAuthOpts := startTestDaemon(t, dstDir)
 
-	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig())
+	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
@@ -198,11 +198,11 @@ func TestBeamToBeamMetadata(t *testing.T) {
 	srcAddr, srcAuthOpts := startTestDaemon(t, srcDir)
 	dstAddr, dstAuthOpts := startTestDaemon(t, dstDir)
 
-	srcMux, _, srcCaps, err := beam.DialBeam(srcAddr, srcAuthOpts, proto.ClientTLSConfig())
+	srcMux, _, srcCaps, err := beam.DialBeam(srcAddr, srcAuthOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
 	t.Cleanup(func() { srcMux.Close() })
 
-	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig())
+	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
@@ -256,7 +256,7 @@ func TestBeamEndToEndEngineIntegration(t *testing.T) {
 
 	dstAddr, dstAuthOpts := startTestDaemon(t, dstDir)
 
-	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig())
+	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
 	t.Cleanup(func() { dstMux.Close() })
 
