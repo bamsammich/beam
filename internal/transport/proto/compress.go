@@ -54,8 +54,9 @@ func NewCompressedConn(conn net.Conn) (net.Conn, error) {
 		return nil, fmt.Errorf("zstd encoder: %w", err)
 	}
 
-	decoder, err := zstd.NewReader(conn)
+	decoder, err := zstd.NewReader(conn, zstd.WithDecoderConcurrency(1))
 	if err != nil {
+		encoder.Close()
 		return nil, fmt.Errorf("zstd decoder: %w", err)
 	}
 
