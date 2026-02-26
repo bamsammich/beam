@@ -30,9 +30,8 @@ go generate ./internal/transport/proto/
 
 ### Known Issues
 
-- **`--bwlimit` has no effect on local copies.** The kernel fast paths (`copy_file_range`, `sendfile`) bypass userspace entirely, so the `rate.Limiter` wrapping `io.Reader`/`io.Writer` is never hit. Fix: when `--bwlimit` is set, skip the kernel fast path and fall back to the userspace read/write loop where the limiter lives.
 - **VHS demo GIFs need re-recording.** The current inline and TUI demo GIFs complete too fast to show the HUD. Re-record after bwlimit is fixed for local copies, or use a real network transfer between two machines.
-- **`DialBeam`/`DialBeamConn`/`DialBeamTunnel` return 4 values.** This triggers `function-result-limit` lint errors (currently suppressed with `//nolint:revive`). Fix: introduce a `BeamConn` result struct (`Mux *proto.Mux`, `Root string`, `Caps transport.Capabilities`) so all three functions return `(BeamConn, error)`. Update all call sites in `beam/endpoint.go`, `beam/discover.go`, `beam/*_test.go`, and `cmd/beam/main.go`.
+- **Compression is not content-aware.** zstd stream compression is always applied (unless `--no-compress`) even for already-compressed data (video, images, archives). This wastes CPU for zero wire savings. Fix: add content-aware suppression — sample the first chunk of each stream or detect incompressible file extensions, and skip compression for data that won't benefit.
 
 ## Non-Goals (v1)
 
