@@ -2,10 +2,16 @@ package proto
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"sync"
 
 	"github.com/klauspost/compress/zstd"
+)
+
+const (
+	compressNone byte = 0x00
+	compressZstd byte = 0x01
 )
 
 // WriteFlusher is implemented by connections that buffer writes and require
@@ -96,4 +102,48 @@ func (c *compressedConn) Release() {
 		c.mu.Unlock()
 		c.decoder.Close()
 	})
+}
+
+// NegotiateCompression performs the client side of compression negotiation.
+// Sends a 1-byte preference, reads the server's 1-byte response.
+// Returns the original conn (no compression) or a compressedConn.
+func NegotiateCompression(conn net.Conn, wantCompress bool) (net.Conn, error) {
+	req := compressNone
+	if wantCompress {
+		req = compressZstd
+	}
+
+	if _, err := conn.Write([]byte{req}); err != nil {
+		return nil, fmt.Errorf("write compression preference: %w", err)
+	}
+
+	var resp [1]byte
+	if _, err := io.ReadFull(conn, resp[:]); err != nil {
+		return nil, fmt.Errorf("read compression response: %w", err)
+	}
+
+	if resp[0] == compressZstd {
+		return NewCompressedConn(conn)
+	}
+	return conn, nil
+}
+
+// AcceptCompression performs the server side of compression negotiation.
+// Reads the client's 1-byte preference, echoes agreement.
+// Returns the original conn (no compression) or a compressedConn.
+func AcceptCompression(conn net.Conn) (net.Conn, error) {
+	var req [1]byte
+	if _, err := io.ReadFull(conn, req[:]); err != nil {
+		return nil, fmt.Errorf("read compression request: %w", err)
+	}
+
+	resp := req[0] // echo: agree to whatever client requested
+	if _, err := conn.Write([]byte{resp}); err != nil {
+		return nil, fmt.Errorf("write compression response: %w", err)
+	}
+
+	if resp == compressZstd {
+		return NewCompressedConn(conn)
+	}
+	return conn, nil
 }

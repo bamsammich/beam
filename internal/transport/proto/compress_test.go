@@ -100,3 +100,73 @@ func TestCompressedConnImplementsWriteFlusher(t *testing.T) {
 	_, ok := conn.(proto.WriteFlusher)
 	assert.True(t, ok, "compressedConn must implement WriteFlusher")
 }
+
+func TestNegotiateCompression(t *testing.T) {
+	t.Parallel()
+
+	t.Run("both want compression", func(t *testing.T) {
+		t.Parallel()
+		clientRaw, serverRaw := net.Pipe()
+
+		var (
+			clientConn net.Conn
+			serverConn net.Conn
+			clientErr  error
+			serverErr  error
+		)
+
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			clientConn, clientErr = proto.NegotiateCompression(clientRaw, true)
+		})
+		wg.Go(func() {
+			serverConn, serverErr = proto.AcceptCompression(serverRaw)
+		})
+		wg.Wait()
+
+		require.NoError(t, clientErr)
+		require.NoError(t, serverErr)
+
+		// Both should be compressed — verify WriteFlusher
+		_, clientOK := clientConn.(proto.WriteFlusher)
+		_, serverOK := serverConn.(proto.WriteFlusher)
+		assert.True(t, clientOK, "client conn should be compressed")
+		assert.True(t, serverOK, "server conn should be compressed")
+
+		clientConn.Close()
+		serverConn.Close()
+	})
+
+	t.Run("client declines compression", func(t *testing.T) {
+		t.Parallel()
+		clientRaw, serverRaw := net.Pipe()
+
+		var (
+			clientConn net.Conn
+			serverConn net.Conn
+			clientErr  error
+			serverErr  error
+		)
+
+		var wg sync.WaitGroup
+		wg.Go(func() {
+			clientConn, clientErr = proto.NegotiateCompression(clientRaw, false)
+		})
+		wg.Go(func() {
+			serverConn, serverErr = proto.AcceptCompression(serverRaw)
+		})
+		wg.Wait()
+
+		require.NoError(t, clientErr)
+		require.NoError(t, serverErr)
+
+		// Neither should be compressed
+		_, clientOK := clientConn.(proto.WriteFlusher)
+		_, serverOK := serverConn.(proto.WriteFlusher)
+		assert.False(t, clientOK, "client conn should NOT be compressed")
+		assert.False(t, serverOK, "server conn should NOT be compressed")
+
+		clientConn.Close()
+		serverConn.Close()
+	})
+}
