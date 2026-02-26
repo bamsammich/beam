@@ -554,7 +554,7 @@ func (e *Writer) MkdirAll(relPath string, perm os.FileMode) error {
 	return e.expectAck(ch)
 }
 
-//nolint:ireturn // implements transport.ReadWriter interface
+//nolint:ireturn // implements transport.ReadWriter interface; WriteFile is the standard return type
 func (e *Writer) CreateTemp(
 	relPath string,
 	perm os.FileMode,
