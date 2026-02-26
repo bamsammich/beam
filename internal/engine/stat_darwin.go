@@ -22,7 +22,13 @@ func devFromStat(stat *syscall.Stat_t) uint64 {
 
 // setFileTimes sets mtime (and optionally atime) on a file by path.
 // Darwin lacks UTIME_OMIT and AT_EMPTY_PATH, so we always use path-based utimensat.
-func setFileTimes(_ int, fdPath string, accTime time.Time, modTime time.Time, preserveAtime bool) error {
+func setFileTimes(
+	_ int,
+	fdPath string,
+	accTime time.Time,
+	modTime time.Time,
+	preserveAtime bool,
+) error {
 	atime := unix.NsecToTimespec(modTime.UnixNano())
 	if preserveAtime {
 		atime = unix.NsecToTimespec(accTime.UnixNano())
