@@ -106,7 +106,8 @@ func (c *compressedConn) Release() {
 
 // NegotiateCompression performs the client side of compression negotiation.
 // Sends a 1-byte preference, reads the server's 1-byte response.
-// Returns the original conn (no compression) or a compressedConn.
+// On success returns the original conn (no compression) or a compressedConn.
+// On error returns nil; the caller must close the original conn.
 func NegotiateCompression(conn net.Conn, wantCompress bool) (net.Conn, error) {
 	req := compressNone
 	if wantCompress {

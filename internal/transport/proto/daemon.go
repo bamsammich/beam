@@ -181,7 +181,9 @@ func (d *Daemon) handleConn(ctx context.Context, conn net.Conn) {
 		return
 	}
 
-	// In-process mode: conn is *tls.Conn from tls.Listen.
+	// In-process mode: conn is *tls.Conn from tls.Listen. The deferred
+	// conn.Close() above captured the original TLS conn; reassigning here
+	// is safe because compressedConn.Close() delegates to the same conn.
 	conn, err := AcceptCompression(conn)
 	if err != nil {
 		slog.Warn("compression negotiation failed", "remote", remoteAddr, "error", err)

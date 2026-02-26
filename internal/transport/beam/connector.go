@@ -31,7 +31,7 @@ type Transport struct {
 	root      string
 	caps      transport.Capabilities
 	connected bool
-	Compress  bool
+	compress  bool
 }
 
 // NewTransport creates a transport for a direct beam:// URL.
@@ -46,7 +46,7 @@ func NewTransport(
 		addr:      addr,
 		authOpts:  authOpts,
 		tlsConfig: tlsConfig,
-		Compress:  compress,
+		compress:  compress,
 	}
 }
 
@@ -65,7 +65,7 @@ func (c *Transport) connect() error {
 	if c.connected {
 		return nil
 	}
-	mux, root, caps, err := DialBeam(c.addr, c.authOpts, c.tlsConfig, c.Compress)
+	mux, root, caps, err := DialBeam(c.addr, c.authOpts, c.tlsConfig, c.compress)
 	if err != nil {
 		return err
 	}

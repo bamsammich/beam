@@ -102,13 +102,13 @@ func DialBeam(
 func DialBeamConn(
 	conn net.Conn, authOpts proto.AuthOpts, compress bool,
 ) (*proto.Mux, string, transport.Capabilities, error) {
-	conn, err := proto.NegotiateCompression(conn, compress)
+	muxConn, err := proto.NegotiateCompression(conn, compress)
 	if err != nil {
 		conn.Close()
 		return nil, "", transport.Capabilities{}, fmt.Errorf("compression negotiation: %w", err)
 	}
 
-	mux := proto.NewMux(conn)
+	mux := proto.NewMux(muxConn)
 
 	// Start mux in background.
 	go mux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
