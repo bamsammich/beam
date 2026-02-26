@@ -16,10 +16,10 @@ import (
 	"github.com/bamsammich/beam/internal/transport/proto"
 )
 
-// TestDialBeamConn verifies the beam handshake over a raw net.Pipe connection
+// TestDialConn verifies the beam handshake over a raw net.Pipe connection
 // (no TLS). The server side simulates the pubkey auth flow, the client side
-// calls DialBeamConn.
-func TestDialBeamConn(t *testing.T) {
+// calls DialConn.
+func TestDialConn(t *testing.T) {
 	t.Parallel()
 
 	// Create a temp directory with test content.
@@ -74,17 +74,17 @@ func TestDialBeamConn(t *testing.T) {
 		<-serverMux.Done()
 	}()
 
-	// Client side: DialBeamConn over the pipe.
-	mux, root, caps, err := beam.DialBeamConn(clientConn, authOpts, false)
+	// Client side: DialConn over the pipe.
+	bc, err := beam.DialConn(clientConn, authOpts, false)
 	require.NoError(t, err)
-	t.Cleanup(func() { mux.Close() })
+	t.Cleanup(func() { bc.Mux.Close() })
 
-	assert.Equal(t, dir, root)
-	assert.True(t, caps.NativeHash)
-	assert.True(t, caps.AtomicRename)
+	assert.Equal(t, dir, bc.Root)
+	assert.True(t, bc.Caps.NativeHash)
+	assert.True(t, bc.Caps.AtomicRename)
 
 	// Create a Reader and verify it works.
-	readBeamEP := beam.NewReader(mux, dir, root, caps)
+	readBeamEP := beam.NewReader(bc.Mux, dir, bc.Root, bc.Caps)
 
 	// Test Stat.
 	entry, err := readBeamEP.Stat("hello.txt")

@@ -65,13 +65,13 @@ func (c *Transport) connect() error {
 	if c.connected {
 		return nil
 	}
-	mux, root, caps, err := DialBeam(c.addr, c.authOpts, c.tlsConfig, c.compress)
+	bc, err := DialBeam(c.addr, c.authOpts, c.tlsConfig, c.compress)
 	if err != nil {
 		return err
 	}
-	c.mux = mux
-	c.root = root
-	c.caps = caps
+	c.mux = bc.Mux
+	c.root = bc.Root
+	c.caps = bc.Caps
 	c.connected = true
 	return nil
 }
@@ -154,7 +154,7 @@ func (c *SSHTransport) ensureConnected() error {
 	if !c.opts.NoBeam {
 		discovery, discErr := ReadRemoteDaemonDiscovery(sshClient)
 		if discErr == nil {
-			mux, root, caps, tunnelErr := DialBeamTunnel(
+			bc, tunnelErr := DialBeamTunnel(
 				sshClient,
 				discovery,
 				c.opts.AuthOpts,
@@ -162,7 +162,7 @@ func (c *SSHTransport) ensureConnected() error {
 			)
 			if tunnelErr == nil {
 				slog.Info("using beam protocol (daemon detected on remote)")
-				c.inner = NewTransportFromMux(mux, root, caps)
+				c.inner = NewTransportFromMux(bc.Mux, bc.Root, bc.Caps)
 				return nil
 			}
 			slog.Debug("beam tunnel failed, using SFTP", "error", tunnelErr)

@@ -159,11 +159,11 @@ func dialBeamTransport(
 ) transport.Transport {
 	t.Helper()
 
-	mux, _, caps, err := beam.DialBeam(addr, authOpts, proto.ClientTLSConfig(), true)
+	bc, err := beam.DialBeam(addr, authOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
-	t.Cleanup(func() { mux.Close() })
+	t.Cleanup(func() { bc.Mux.Close() })
 
-	return beam.NewTransportFromMux(mux, root, caps)
+	return beam.NewTransportFromMux(bc.Mux, root, bc.Caps)
 }
 
 // dialBeamTransportCustomRoots dials a beam daemon and returns a Transport
@@ -178,11 +178,11 @@ func dialBeamTransportCustomRoots(
 ) transport.Transport {
 	t.Helper()
 
-	mux, _, caps, err := beam.DialBeam(addr, authOpts, proto.ClientTLSConfig(), true)
+	bc, err := beam.DialBeam(addr, authOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
-	t.Cleanup(func() { mux.Close() })
+	t.Cleanup(func() { bc.Mux.Close() })
 
-	return beam.NewTransportFromMux(mux, daemonRoot, caps)
+	return beam.NewTransportFromMux(bc.Mux, daemonRoot, bc.Caps)
 }
 
 // createModifiedTestTree creates a test tree at root that is slightly

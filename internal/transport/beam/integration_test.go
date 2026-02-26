@@ -57,16 +57,16 @@ func TestBeamToBeamTransfer(t *testing.T) {
 	dstAddr, dstAuthOpts := startTestDaemon(t, dstDir)
 
 	// --- Connect to both ---
-	srcMux, _, srcCaps, err := beam.DialBeam(srcAddr, srcAuthOpts, proto.ClientTLSConfig(), true)
+	srcBC, err := beam.DialBeam(srcAddr, srcAuthOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
-	t.Cleanup(func() { srcMux.Close() })
+	t.Cleanup(func() { srcBC.Mux.Close() })
 
-	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig(), true)
+	dstBC, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
-	t.Cleanup(func() { dstMux.Close() })
+	t.Cleanup(func() { dstBC.Mux.Close() })
 
-	srcEP := beam.NewReader(srcMux, srcDir, srcDir, srcCaps)
-	dstEP := beam.NewWriter(dstMux, dstDir, dstDir, dstCaps)
+	srcEP := beam.NewReader(srcBC.Mux, srcDir, srcDir, srcBC.Caps)
+	dstEP := beam.NewWriter(dstBC.Mux, dstDir, dstDir, dstBC.Caps)
 
 	// --- Walk source, replicate to dest ---
 	var entries []transport.FileEntry
@@ -155,16 +155,16 @@ func TestBeamTransferCompressionOptOut(t *testing.T) {
 	dstAddr, dstAuthOpts := startTestDaemon(t, dstDir)
 
 	// Dial with compress=false.
-	srcMux, _, srcCaps, err := beam.DialBeam(srcAddr, srcAuthOpts, proto.ClientTLSConfig(), false)
+	srcBC, err := beam.DialBeam(srcAddr, srcAuthOpts, proto.ClientTLSConfig(), false)
 	require.NoError(t, err)
-	t.Cleanup(func() { srcMux.Close() })
+	t.Cleanup(func() { srcBC.Mux.Close() })
 
-	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig(), false)
+	dstBC, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig(), false)
 	require.NoError(t, err)
-	t.Cleanup(func() { dstMux.Close() })
+	t.Cleanup(func() { dstBC.Mux.Close() })
 
-	srcEP := beam.NewReader(srcMux, srcDir, srcDir, srcCaps)
-	dstEP := beam.NewWriter(dstMux, dstDir, dstDir, dstCaps)
+	srcEP := beam.NewReader(srcBC.Mux, srcDir, srcDir, srcBC.Caps)
+	dstEP := beam.NewWriter(dstBC.Mux, dstDir, dstDir, dstBC.Caps)
 
 	// Transfer the file.
 	rc, err := srcEP.OpenRead("compressible.bin")
@@ -200,11 +200,11 @@ func TestBeamToBeamDeleteSync(t *testing.T) {
 
 	dstAddr, dstAuthOpts := startTestDaemon(t, dstDir)
 
-	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig(), true)
+	dstBC, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
-	t.Cleanup(func() { dstMux.Close() })
+	t.Cleanup(func() { dstBC.Mux.Close() })
 
-	dstEP := beam.NewWriter(dstMux, dstDir, dstDir, dstCaps)
+	dstEP := beam.NewWriter(dstBC.Mux, dstDir, dstDir, dstBC.Caps)
 
 	// Walk destination to find extraneous files.
 	srcFiles := map[string]bool{"keep.txt": true}
@@ -246,16 +246,16 @@ func TestBeamToBeamMetadata(t *testing.T) {
 	srcAddr, srcAuthOpts := startTestDaemon(t, srcDir)
 	dstAddr, dstAuthOpts := startTestDaemon(t, dstDir)
 
-	srcMux, _, srcCaps, err := beam.DialBeam(srcAddr, srcAuthOpts, proto.ClientTLSConfig(), true)
+	srcBC, err := beam.DialBeam(srcAddr, srcAuthOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
-	t.Cleanup(func() { srcMux.Close() })
+	t.Cleanup(func() { srcBC.Mux.Close() })
 
-	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig(), true)
+	dstBC, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
-	t.Cleanup(func() { dstMux.Close() })
+	t.Cleanup(func() { dstBC.Mux.Close() })
 
-	srcEP := beam.NewReader(srcMux, srcDir, srcDir, srcCaps)
-	dstEP := beam.NewWriter(dstMux, dstDir, dstDir, dstCaps)
+	srcEP := beam.NewReader(srcBC.Mux, srcDir, srcDir, srcBC.Caps)
+	dstEP := beam.NewWriter(dstBC.Mux, dstDir, dstDir, dstBC.Caps)
 
 	// Copy the file.
 	entry, err := srcEP.Stat("meta.txt")
@@ -304,11 +304,11 @@ func TestBeamEndToEndEngineIntegration(t *testing.T) {
 
 	dstAddr, dstAuthOpts := startTestDaemon(t, dstDir)
 
-	dstMux, _, dstCaps, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig(), true)
+	dstBC, err := beam.DialBeam(dstAddr, dstAuthOpts, proto.ClientTLSConfig(), true)
 	require.NoError(t, err)
-	t.Cleanup(func() { dstMux.Close() })
+	t.Cleanup(func() { dstBC.Mux.Close() })
 
-	dstConn := beam.NewTransportFromMux(dstMux, dstDir, dstCaps)
+	dstConn := beam.NewTransportFromMux(dstBC.Mux, dstDir, dstBC.Caps)
 
 	// Use the engine to copy srcDir/dir/ → dstDir/ via beam transport.
 	ctx := context.Background()
