@@ -32,8 +32,9 @@ type Mux struct {
 // NewMux creates a new multiplexer wrapping the given connection.
 // Call Run() to start the read/write loops.
 // If the underlying connection supports it, TCP_NODELAY is set to avoid
-// Nagle-algorithm delays on small frames (the buffered writer in writeLoop
-// handles batching at the application level).
+// Nagle-algorithm delays on small frames. Application-level batching is
+// handled by bufio.Writer (plain conns) or the compressor's internal
+// buffer (conns implementing WriteFlusher).
 func NewMux(conn net.Conn) *Mux {
 	// Set TCP_NODELAY — the buffered writer handles coalescing.
 	//nolint:errcheck // best-effort; non-TCP connections may not support this
@@ -147,6 +148,12 @@ func (m *Mux) Run() error {
 
 	wg.Wait()
 
+	// Release codec resources (e.g. zstd encoder/decoder goroutines) now
+	// that all read/write goroutines have stopped.
+	if r, ok := m.conn.(Releaser); ok {
+		r.Release()
+	}
+
 	// Close all remaining stream channels so receivers unblock.
 	m.mu.Lock()
 	for id, ch := range m.streams {
@@ -229,40 +236,54 @@ func (m *Mux) readLoop() error {
 
 //nolint:revive // cognitive-complexity: select-in-loop with shutdown handling is inherently branchy
 func (m *Mux) writeLoop() error {
-	bw := bufio.NewWriterSize(m.conn, 64*1024)
+	var w io.Writer
+	var flush func() error
+
+	if wf, ok := m.conn.(WriteFlusher); ok {
+		// Compressed conn: write directly, flush via WriteFlusher.
+		// The compressor's internal buffer replaces bufio.Writer.
+		w = m.conn
+		flush = wf.Flush
+	} else {
+		// Uncompressed: use bufio.Writer as before.
+		bw := bufio.NewWriterSize(m.conn, 64*1024)
+		w = bw
+		flush = bw.Flush
+	}
+
 	for {
 		select {
 		case f, ok := <-m.writeCh:
 			if !ok {
 				// writeCh closed by Run() — flush and exit.
-				return bw.Flush()
+				return flush()
 			}
-			if err := WriteFrame(bw, f); err != nil {
+			if err := WriteFrame(w, f); err != nil {
 				return fmt.Errorf("write frame: %w", err)
 			}
 			// Flush when the write channel is drained (no more frames queued),
 			// so we batch multiple frames into fewer TCP segments.
 			if len(m.writeCh) == 0 {
-				if err := bw.Flush(); err != nil {
+				if err := flush(); err != nil {
 					return fmt.Errorf("flush: %w", err)
 				}
 			}
 		case <-m.shutdownCh:
-			return m.drainWrites(bw)
+			return m.drainWrites(w, flush)
 		}
 	}
 }
 
 // drainWrites flushes remaining frames from writeCh during graceful shutdown.
-func (m *Mux) drainWrites(bw *bufio.Writer) error {
+func (m *Mux) drainWrites(w io.Writer, flush func() error) error {
 	for {
 		select {
 		case f := <-m.writeCh:
-			if err := WriteFrame(bw, f); err != nil {
+			if err := WriteFrame(w, f); err != nil {
 				return fmt.Errorf("write frame: %w", err)
 			}
 		default:
-			return bw.Flush()
+			return flush()
 		}
 	}
 }

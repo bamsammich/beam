@@ -3,6 +3,7 @@ package proto
 import (
 	"fmt"
 	"net"
+	"sync"
 
 	"github.com/klauspost/compress/zstd"
 )
@@ -14,13 +15,26 @@ type WriteFlusher interface {
 	Flush() error
 }
 
+// Releaser is implemented by connections that hold resources (e.g. codec
+// goroutines) that must be freed after all I/O has stopped. The mux calls
+// Release after its read/write goroutines have exited.
+type Releaser interface {
+	Release()
+}
+
 // compressedConn wraps a net.Conn with zstd streaming compression.
 // Writes are compressed by the encoder; reads are decompressed by the decoder.
 // Implements net.Conn and WriteFlusher.
+//
+// Close only shuts down the underlying conn (to unblock concurrent Read/Write),
+// then releases encoder/decoder resources exactly once. The mutex serializes
+// encoder operations (Write, Flush) to prevent data races during teardown.
 type compressedConn struct {
 	net.Conn
 	encoder *zstd.Encoder
 	decoder *zstd.Decoder
+	mu      sync.Mutex // protects encoder methods
+	once    sync.Once  // ensures encoder/decoder cleanup runs once
 }
 
 // NewCompressedConn wraps a net.Conn with zstd streaming compression.
@@ -51,20 +65,35 @@ func (c *compressedConn) Read(p []byte) (int, error) {
 }
 
 func (c *compressedConn) Write(p []byte) (int, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.encoder.Write(p)
 }
 
 // Flush emits a syncable zstd frame so the decoder can consume buffered data
 // immediately. Called by the mux writeLoop when the write channel drains.
 func (c *compressedConn) Flush() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	return c.encoder.Flush()
 }
 
-// Close shuts down the encoder, closes the underlying conn (to unblock the
-// decoder's background reader goroutine), then releases the decoder.
+// Close shuts down the connection by closing the underlying conn to unblock
+// any concurrent Read/Write calls. Codec resources (encoder/decoder) are
+// not released here — call Release after all goroutines using the conn have
+// stopped (e.g. after mux.Run returns).
 func (c *compressedConn) Close() error {
-	c.encoder.Close()
-	err := c.Conn.Close()
-	c.decoder.Close()
-	return err
+	return c.Conn.Close()
+}
+
+// Release frees the zstd encoder and decoder resources. Must be called after
+// all concurrent Read/Write/Flush calls have stopped (i.e. after the mux's
+// Run method returns). Safe to call multiple times.
+func (c *compressedConn) Release() {
+	c.once.Do(func() {
+		c.mu.Lock()
+		c.encoder.Close()
+		c.mu.Unlock()
+		c.decoder.Close()
+	})
 }

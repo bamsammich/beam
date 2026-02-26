@@ -44,6 +44,8 @@ func TestCompressedConnRoundTrip(t *testing.T) {
 	wg.Wait()
 	clientConn.Close()
 	serverConn.Close()
+	clientConn.(proto.Releaser).Release()
+	serverConn.(proto.Releaser).Release()
 }
 
 func TestCompressedConnLargePayload(t *testing.T) {
@@ -77,6 +79,8 @@ func TestCompressedConnLargePayload(t *testing.T) {
 	wg.Wait()
 	clientConn.Close()
 	serverConn.Close()
+	clientConn.(proto.Releaser).Release()
+	serverConn.(proto.Releaser).Release()
 }
 
 func TestCompressedConnImplementsWriteFlusher(t *testing.T) {
@@ -88,7 +92,10 @@ func TestCompressedConnImplementsWriteFlusher(t *testing.T) {
 
 	conn, err := proto.NewCompressedConn(clientRaw)
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() {
+		conn.Close()
+		conn.(proto.Releaser).Release()
+	}()
 
 	_, ok := conn.(proto.WriteFlusher)
 	assert.True(t, ok, "compressedConn must implement WriteFlusher")

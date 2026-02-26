@@ -255,6 +255,71 @@ func TestMuxShutdownDrainsWrites(t *testing.T) {
 	wg.Wait()
 }
 
+func TestMuxWithCompressedConn(t *testing.T) {
+	t.Parallel()
+
+	clientRaw, serverRaw := net.Pipe()
+
+	clientConn, err := proto.NewCompressedConn(clientRaw)
+	require.NoError(t, err)
+	serverConn, err := proto.NewCompressedConn(serverRaw)
+	require.NoError(t, err)
+
+	clientMux := proto.NewMux(clientConn)
+	serverMux := proto.NewMux(serverConn)
+
+	var wg sync.WaitGroup
+	wg.Go(func() {
+		clientMux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
+	})
+	wg.Go(func() {
+		serverMux.Run() //nolint:errcheck // mux.Run error propagated via mux closure
+	})
+
+	clientCh := clientMux.OpenStream(1)
+	serverCh := serverMux.OpenStream(1)
+
+	// Client sends, server receives — through compressed conn.
+	payload := []byte("compressed mux frame")
+	require.NoError(t, clientMux.Send(proto.Frame{
+		StreamID: 1,
+		MsgType:  proto.MsgStatReq,
+		Payload:  payload,
+	}))
+
+	select {
+	case f := <-serverCh:
+		assert.Equal(t, uint32(1), f.StreamID)
+		assert.Equal(t, proto.MsgStatReq, f.MsgType)
+		assert.Equal(t, payload, f.Payload)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for frame on server")
+	}
+
+	// Server sends, client receives.
+	respPayload := []byte("compressed response")
+	require.NoError(t, serverMux.Send(proto.Frame{
+		StreamID: 1,
+		MsgType:  proto.MsgStatResp,
+		Payload:  respPayload,
+	}))
+
+	select {
+	case f := <-clientCh:
+		assert.Equal(t, uint32(1), f.StreamID)
+		assert.Equal(t, proto.MsgStatResp, f.MsgType)
+		assert.Equal(t, respPayload, f.Payload)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timeout waiting for frame on client")
+	}
+
+	clientMux.CloseStream(1)
+	serverMux.CloseStream(1)
+	clientMux.Close()
+	serverMux.Close()
+	wg.Wait()
+}
+
 func TestMuxSendAfterClose(t *testing.T) {
 	t.Parallel()
 
