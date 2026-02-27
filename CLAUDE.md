@@ -28,10 +28,6 @@ After modifying `internal/transport/proto/messages.go`, regenerate msgp code:
 go generate ./internal/transport/proto/
 ```
 
-### Known Issues
-
-- **VHS demo GIFs need re-recording.** The current inline and TUI demo GIFs complete too fast to show the HUD. Re-record after bwlimit is fixed for local copies, or use a real network transfer between two machines.
-
 ## Non-Goals (v1)
 
 - GUI
